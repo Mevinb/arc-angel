@@ -10,10 +10,11 @@ Subcommands:
   jarvis automate start          run the scheduler loop
   jarvis doctor               health check
   jarvis init                 create config + profile interactively
-  jarvis skills search QUERY  search the SKILL.md skill library
+  jarvis skills search QUERY  search the SKILL.md & component library
   jarvis skills list          list installed skills
   jarvis skills categories    list skill categories
   jarvis skills install       clone/install the skill collection
+  jarvis skills add-source    add a catalog source (e.g. awesome-ai-agent-tools)
 """
 
 from __future__ import annotations
@@ -93,6 +94,14 @@ def _build_parser() -> argparse.ArgumentParser:
                                 help="source repo URL")
     skills_install.add_argument("--source", default="",
                                 help="local copy source dir (skips network clone)")
+    skills_add = skills_sub.add_parser("add-source",
+                                       help="add a catalog-style source e.g. awesome-ai-agent-tools")
+    skills_add.add_argument("--repo", default="https://github.com/michielhdoteth/awesome-ai-agent-tools.git",
+                            help="catalog repo URL")
+    skills_add.add_argument("--name", default="",
+                            help="source name/dir (defaults to repo basename)")
+    skills_add.add_argument("--source", default="",
+                            help="local copy source dir (skips network clone)")
     return parser
 
 
@@ -227,6 +236,27 @@ def _cmd_skills(app: JarvisApp, args: argparse.Namespace) -> int:
         console.print(f"  indexed {fresh.count} skills in {fresh.categories_with_counts().__len__()} categories")
         return 0
 
+    if cmd == "add-source":
+        from .skills.install import install_source
+        from .skills.index import SkillLibrary, SOURCES_DIRNAME
+        dest = app.skills_root or (app.config.data_dir / "skills")
+        source_root = dest / SOURCES_DIRNAME
+        source_root.mkdir(parents=True, exist_ok=True)
+        console.print(f"[bold]Adding catalog source into {source_root}…[/bold]")
+        try:
+            root = install_source(source_root, repo_url=args.repo,
+                                  name=args.name,
+                                  source=Path(args.source) if args.source else None)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]Add-source failed:[/red] {exc}")
+            return 1
+        console.print(f"[green]✓ Added.[/green]")
+        merged = SkillLibrary(dest,
+                              extra_roots=[p for p in source_root.iterdir() if p.is_dir()])
+        console.print(f"  source now contributes {merged.count} components "
+                      f"({merged.categories_with_counts().__len__()} categories)")
+        return 0
+
     if library is None or not library.count:
         console.print("[yellow]Skill library not installed.[/yellow] "
                       "Run `jarvis skills install` to clone it.")
@@ -244,8 +274,9 @@ def _cmd_skills(app: JarvisApp, args: argparse.Namespace) -> int:
             console.print(f"No skills match {escape(' '.join(args.query))!r}")
             return 1
         for i, entry in enumerate(results, 1):
-            console.print(f"{i}. [cyan]{entry.name}[/cyan] [{entry.category}] — "
-                          f"{escape(entry.description)}")
+            kind = f" ({entry.kind})" if entry.kind and not entry.name.endswith(f" ({entry.kind})") else ""
+            console.print(f"{i}. [cyan]{entry.name}[/cyan]{escape(kind)} "
+                          f"[{entry.category}] — {escape(entry.description)}")
         return 0
 
     # list
@@ -254,8 +285,9 @@ def _cmd_skills(app: JarvisApp, args: argparse.Namespace) -> int:
         console.print(f"No skills{ ' in '+escape(args.category) if args.category else '' }.")
         return 1
     for i, entry in enumerate(entries[:args.limit], 1):
-        console.print(f"{i}. [cyan]{entry.name}[/cyan] [{entry.category}] — "
-                      f"{escape(entry.description)}")
+        kind = f" ({entry.kind})" if entry.kind and not entry.name.endswith(f" ({entry.kind})") else ""
+        console.print(f"{i}. [cyan]{entry.name}[/cyan]{escape(kind)} "
+                      f"[{entry.category}] — {escape(entry.description)}")
     if len(entries) > args.limit:
         console.print(f"[dim]… and {len(entries) - args.limit} more "
                       f"(use --limit to show more)[/dim]")

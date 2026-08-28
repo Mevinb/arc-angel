@@ -79,13 +79,17 @@ def _skills_prompt_block(skills: Optional[Any]) -> str:
     if skills is None or not getattr(skills, "count", 0):
         return ""
     categories = getattr(skills, "categories_with_counts", None)
-    lines = ["\n# Skill library",
-             "You have a library of expert SKILL.md skills covering many domains. "
-             "For domain-specific or complex tasks, FIRST look for a relevant skill: "
-             "call `skills.search(\"<topic>\")` to find candidates, then "
-             "`skills.load(\"<name>\")` to bring a skill's instructions into scope "
-             "before answering. Use `skills.categories` to browse. "
-             "Only use skills genuinely relevant to the task; do not load them "
+    lines = ["\n# Skill & component library",
+             "You have a library of expert SKILL.md skills and a catalog of AI "
+             "agent components (MCP servers, loops, subagents, hooks, plugins, "
+             "prompts, CLI tools). For domain-specific, complex, or "
+             "infrastructure tasks, FIRST look for a relevant entry: "
+             "call `skills.search(\"<topic>\")` to find candidates "
+             "(optionally filtered by `kind`), then `skills.load(\"<name>\")` "
+             "to bring a skill's instructions into scope, or an MCP/loop/hook/"
+             "tool's description and exact install command, before answering. "
+             "Use `skills.categories` to browse. "
+             "Only use entries genuinely relevant to the task; do not load them "
              "for trivial questions."]
     if categories is not None:
         try:

@@ -20,7 +20,7 @@ from .db.database import Database
 from .internships.engine import InternshipEngine, register_internship_tools
 from .profile.profile import Profile
 from .safety.permissions import Approver, PermissionGuard
-from .skills.index import SkillLibrary
+from .skills.index import SkillLibrary, _discover_sources
 from .skills.tools import register_skills_tools
 from .tools.base import ToolRegistry
 from .tools.browser import register_browser_tools
@@ -48,8 +48,17 @@ class JarvisApp:
         self.registry = ToolRegistry(self.guard)
 
         # Skills (SKILL.md collection) — optional; degrades to no-op if absent.
+        # Extra catalog sources (awesome-ai-agent-tools & co.) are auto-discovered
+        # under <skills_root>/sources and merged in.
         self.skills_root = self._resolve_skills_root()
-        self.skills = SkillLibrary(self.skills_root) if self.skills_root else None
+        self.skills = None
+        if self.skills_root:
+            try:
+                self.skills = SkillLibrary(self.skills_root,
+                                           extra_roots=_discover_sources(self.skills_root))
+            except Exception as exc:  # noqa: BLE001 - never break startup
+                logger.warning("Failed to load skill library: %s", exc)
+                self.skills = None
 
         # Engines
         self.gmail_engine = GmailEngine(
@@ -139,13 +148,19 @@ class JarvisApp:
     def _skills_report(self) -> Dict[str, Any]:
         if self.skills is None or not self.skills.count:
             return {"available": False, "count": 0, "content": False,
-                    "root": str(self.skills_root or ""), "categories": 0}
+                    "root": str(self.skills_root or ""), "categories": 0,
+                    "kinds": {}}
+        kinds = {}
+        for entry in self.skills._entries.values():
+            kind = entry.kind or "skill"
+            kinds[kind] = kinds.get(kind, 0) + 1
         return {
             "available": True,
             "count": self.skills.count,
             "content": self.skills.content_available,
             "root": str(self.skills_root or ""),
             "categories": len(self.skills.categories),
+            "kinds": kinds,
         }
 
     def close(self) -> None:

@@ -90,6 +90,50 @@ def _finalize(dest: Path) -> None:
         write_index(dest, content, index)
 
 
+def install_source(sources_root: Path, repo_url: str = "",
+                   name: str = "", source: Optional[Path] = None) -> Path:
+    """Clone (or copy) a catalog-style source into ``sources_root/<name>/``.
+
+    ``sources_root`` is the JARVIS ``<skills_root>/sources`` directory; the
+    source lands in its own subdirectory which ``SkillLibrary`` auto-discovers.
+    Returns the installed source path.
+    """
+    sources_root = Path(sources_root)
+    sources_root.mkdir(parents=True, exist_ok=True)
+    repo_url = repo_url or "https://github.com/michielhdoteth/awesome-ai-agent-tools.git"
+    if name:
+        name = name.strip().strip("/")
+    else:
+        # derive from the repo URL's basename (without .git) or fall back
+        name = Path(repo_url.rstrip("/").rsplit("/", 1)[-1]).stem or "source"
+    dest = sources_root / name
+
+    if source is not None:
+        # Full recursive copy of a catalog repo (it has no Luo-Kai content/
+        # index layout to cherry-pick).
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(Path(source), dest)
+        return dest
+
+    # New clone into a unique subdir then move into place (avoid partial state).
+    tmp = sources_root / f".tmp-{name}"
+    if tmp.exists():
+        shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--quiet", repo_url, str(tmp)],
+            check=True, capture_output=True, text=True, timeout=1200,
+        )
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        tmp.rename(dest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return dest
+
+
 def write_index(root: Path, content: Path, index: Path) -> None:
     """Rebuild a ``skills-index.json`` by scanning ``**/SKILL.md`` frontmatter."""
     from .index import _read_frontmatter
@@ -110,5 +154,5 @@ def write_index(root: Path, content: Path, index: Path) -> None:
                      encoding="utf-8")
 
 
-__all__ = ["install_skills", "write_index", "REPO_URL",
+__all__ = ["install_skills", "install_source", "write_index", "REPO_URL",
            "CONTENT_SOURCE_DIR", "CONTENT_DIRNAME", "INDEX_FILENAME"]

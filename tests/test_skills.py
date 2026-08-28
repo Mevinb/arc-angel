@@ -182,6 +182,154 @@ class TestSkillsTools:
             assert reg.get(name).risk.name == "GREEN"
 
 
+# --------------------------------------------------------------- catalog source
+def _make_catalog_root(root: Path) -> Path:
+    """Build a minimal awesome-ai-agent-tools-style catalog root.
+
+    One entry per category (skills, mcps, loops, plugins) exercising the varied
+    field names, plus a bundled SKILL.md so load() has real content.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "skills").mkdir(parents=True, exist_ok=True)
+    (root / "skills" / "catalog.json").write_text(json.dumps({
+        "name": "Skills Catalog", "skills": [
+            {"id": "executing-plans", "name": "Executing Plans",
+             "source": "obra/superpowers", "category": "Development",
+             "description": "Executes implementation plans.",
+             "install": "npx skills add obra/superpowers --skill executing-plans"},
+        ]}), encoding="utf-8")
+    (root / "mcps").mkdir(parents=True, exist_ok=True)
+    (root / "mcps" / "catalog.json").write_text(json.dumps({
+        "servers": [
+            {"id": "filesystem", "name": "Filesystem MCP",
+             "category": "Official Reference", "description": "File operations.",
+             "github": "https://github.com/modelcontextprotocol/servers",
+             "install": "npx -y @modelcontextprotocol/server-filesystem /tmp"},
+        ]}), encoding="utf-8")
+    (root / "loops").mkdir(parents=True, exist_ok=True)
+    (root / "loops" / "catalog.json").write_text(json.dumps({
+        "loops": [
+            {"id": "docs-sweep", "title": "The docs sweep",
+             "category": "engineering", "sourceRepo": "Forward-Future/loop-library",
+             "description": "Keeps docs aligned.",
+             "source": "https://sig.example/docs-sweep"},
+        ]}), encoding="utf-8")
+    (root / "plugins").mkdir(parents=True, exist_ok=True)
+    (root / "plugins" / "catalog.json").write_text(json.dumps({
+        "plugins": [
+            {"id": "claude-plugins", "name": "Official Claude Plugins",
+             "category": "Claude Code", "description": "Plugin marketplace.",
+             "websiteUrl": "https://claude.ai/plugins",
+             "installCommand": "claude install @anthropics/claude-plugins"},
+        ]}), encoding="utf-8")
+    bundled = root / "assets" / "skills" / "awesome-ai-agent-tools"
+    bundled.mkdir(parents=True, exist_ok=True)
+    (bundled / "SKILL.md").write_text(QA_SKILL, encoding="utf-8")
+    return root
+
+
+class TestCatalogSource:
+    def test_parses_all_categories(self, tmp_path: Path):
+        lib = SkillLibrary(tmp_path / "skills", extra_roots=[_make_catalog_root(tmp_path / "src")])
+        kinds = {e.kind for e in lib._entries.values()}
+        assert {"skill", "mcps", "loops", "plugins"} <= kinds
+        # 4 catalog entries + 1 bundled SKILL.md
+        assert lib.count == 5
+
+    def test_kind_fields_populated(self, tmp_path: Path):
+        lib = SkillLibrary(tmp_path / "skills", extra_roots=[_make_catalog_root(tmp_path / "src")])
+        mcp = lib.get("Filesystem MCP")
+        assert mcp.kind == "mcps"
+        assert "modelcontextprotocol" in mcp.source_url
+        assert "npx -y @modelcontextprotocol" in mcp.install
+        plugin = lib.get("Official Claude Plugins")
+        assert plugin.kind == "plugins"
+        assert plugin.install == "claude install @anthropics/claude-plugins"
+
+    def test_search_across_kinds(self, tmp_path: Path):
+        lib = SkillLibrary(tmp_path / "skills", extra_roots=[_make_catalog_root(tmp_path / "src")])
+        hits = {e.name: e.kind for e in lib.search("filesystem")}
+        assert hits.get("Filesystem MCP") == "mcps"
+        loop = lib.search("docs")
+        assert any(e.kind == "loops" for e in loop)
+
+    def test_load_catalog_entry_synthesizes(self, tmp_path: Path):
+        lib = SkillLibrary(tmp_path / "skills", extra_roots=[_make_catalog_root(tmp_path / "src")])
+        content = lib.load("Filesystem MCP")
+        assert "Kind: mcps" in content
+        assert "Install: npx -y" in content
+        assert "Source:" in content
+
+    def test_load_bundled_skill_returns_content(self, tmp_path: Path):
+        lib = SkillLibrary(tmp_path / "skills", extra_roots=[_make_catalog_root(tmp_path / "src")])
+        content = lib.load("qa-expert")
+        assert "Review test coverage" in content
+
+    def test_duplicate_name_disambiguated(self, tmp_path: Path):
+        root = tmp_path / "skills"
+        root.mkdir(parents=True, exist_ok=True)
+        # primary index contains qa-expert; catalog also bundles a qa-expert
+        _make_index(root)
+        lib = SkillLibrary(root, extra_roots=[_make_catalog_root(tmp_path / "src")])
+        assert lib.get("qa-expert") is not None  # primary kept
+        assert lib.count >= 3
+
+    def test_collision_entry_resolvable_by_renamed_key(self, tmp_path: Path):
+        # A catalog entry whose name collides with a primary skill is renamed
+        # with its kind suffix and stays resolvable + loadable.
+        root = tmp_path / "skills"
+        root.mkdir(parents=True, exist_ok=True)
+        _make_index(root)  # primary: qa-expert, mssql
+        src = tmp_path / "src"
+        (src / "mcps").mkdir(parents=True)
+        (src / "mcps" / "catalog.json").write_text(json.dumps({
+            "servers": [{"id": "mssql", "name": "mssql",
+                         "category": "Databases",
+                         "description": "MSSQL MCP server.",
+                         "github": "https://github.com/x/mssql",
+                         "install": "npx -y mssql-mcp"}]}),
+            encoding="utf-8")
+        lib = SkillLibrary(root, extra_roots=[src])
+        primary = lib.get("mssql")
+        assert primary is not None and primary.kind == ""  # primary wins the plain name
+        assert "Optimize queries" in lib.load("mssql")
+        renamed = lib.get("mssql (mcps)")
+        assert renamed is not None and renamed.kind == "mcps"
+        assert "Install: npx -y mssql-mcp" in lib.load("mssql (mcps)")
+
+    def test_skill_load_missing_kind_returns_empty(self, tmp_path: Path):
+        # An indexed-but-missing non-catalog skill still returns ""
+        lib = _make_index(tmp_path / "skills")
+        assert lib.load("nope") == ""
+
+
+class TestCatalogSearchToolKindFilter:
+    def test_kind_filter(self, tmp_path: Path):
+        root = tmp_path / "skills"
+        root.mkdir(parents=True, exist_ok=True)
+        _make_index(root)
+        library = SkillLibrary(root, extra_roots=[_make_catalog_root(tmp_path / "src")])
+        registry = ToolRegistry(PermissionGuard(mode="auto"))
+        register_skills_tools(registry, library)
+        mcp = registry.call("skills.search", {"query": "filesystem", "kind": "mcps"})
+        assert mcp.ok
+        assert "Filesystem MCP" in mcp.output
+        # keyword will not match the filesystem mcp (it is described by 'file ops')
+        skill = registry.call("skills.search", {"query": "filesystem", "kind": "skill"})
+        assert not skill.ok or "Filesystem MCP" not in skill.output
+
+    def test_load_tool_kind_header(self, tmp_path: Path):
+        root = tmp_path / "skills"
+        root.mkdir(parents=True, exist_ok=True)
+        _make_index(root)
+        library = SkillLibrary(root, extra_roots=[_make_catalog_root(tmp_path / "src")])
+        registry = ToolRegistry(PermissionGuard(mode="auto"))
+        register_skills_tools(registry, library)
+        res = registry.call("skills.load", {"name": "Filesystem MCP"})
+        assert res.ok and "Mcps: Filesystem MCP" in res.output
+        assert res.data["kind"] == "mcps"
+
+
 # ------------------------------------------------------------------- wiring
 class TestSkillsWiring:
     def test_skills_tools_registered_and_report(self, tmp_path: Path):
@@ -210,3 +358,41 @@ class TestSkillsWiring:
             assert app.health_report()["skills"]["available"] is False
         finally:
             app.close()
+
+    def test_sources_auto_discovered_from_sources_dir(self, tmp_path: Path):
+        config = load_config(project_root=tmp_path)
+        config.safety_mode = "auto"
+        config.skills = {"root": str(tmp_path / "skills")}
+        _make_index(tmp_path / "skills")
+        # add a catalog source under data/skills/sources/<name>/
+        _make_catalog_root(tmp_path / "skills" / "sources" / "awesome")
+        app = JarvisApp(config=config, quiet=True)
+        try:
+            # the catalog entries (mcps/loops/...) are indexed alongside skills
+            hits = app.skills.search("filesystem")
+            assert any(e.kind == "mcps" for e in hits)
+            report = app.health_report()
+            assert report["skills"]["available"] is True
+            assert report["skills"]["kinds"].get("mcps", 0) >= 1
+            assert report["skills"]["count"] >= 4
+        finally:
+            app.close()
+
+
+# ---------------------------------------------------------------- install
+class TestInstallSource:
+    def test_copy_local_source(self, tmp_path: Path):
+        from jarvis.skills.install import install_source
+        src = _make_catalog_root(tmp_path / "local-src")
+        sources_root = tmp_path / "skills" / "sources"
+        dest = install_source(sources_root, repo_url="https://github.com/x/y.git",
+                              name="awesome", source=src)
+        assert (dest / "skills" / "catalog.json").is_file()
+        assert dest.name == "awesome"
+
+    def test_derives_name_from_repo_url(self, tmp_path: Path):
+        from jarvis.skills.install import install_source
+        dest = install_source(tmp_path / "sources",
+                              repo_url="https://github.com/me/awesome-x.git",
+                              source=_make_catalog_root(tmp_path / "s2"))
+        assert dest.name == "awesome-x"

@@ -6,6 +6,7 @@ data/
 config/config.yaml
 gmail-credentials.json
 gmail-token.json
+client_secret*.json
 
 # Python
 __pycache__/

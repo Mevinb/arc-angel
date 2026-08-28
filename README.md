@@ -142,13 +142,33 @@ jarvis skills install                 # clone from GitHub into data/skills
 jarvis skills install --source /path # copy from a local copy (no network)
 ```
 
+Beyond the Luo-Kai `SKILL.md` collection, JARVIS also indexes catalog-style
+sources such as
+[awesome-ai-agent-tools](https://github.com/michielhdoteth/awesome-ai-agent-tools)
+(a curated library of AI-agent components). One catalog source adds hundreds of
+searchable entries — **MCP servers, agent loops, subagents, hooks, plugins,
+prompts and CLI tools** — each with its source, description and exact install
+command, discovered through the same `skills.search`/`skills.load` tools:
+
+```bash
+jarvis skills add-source                                    # clone awesome-ai-agent-tools
+jarvis skills add-source --repo <url> --name <dir>          # any catalog repo
+jarvis skills add-source --source /path/to/catalog --name x # copy from local (no network)
+```
+
+Sources land in `<skills_root>/sources/<name>/` and are auto-discovered on the
+next run. `skills.search(..., kind="mcp")` filters by component type, and
+`skills.load("Filesystem MCP")` returns the component's description, source and
+install command.
+
 Discover and use skills from the REPL or one-shot via the agent tools:
 
 ```
-skills.search(query)   # find skills by name/description/category
+skills.search(query)   # find skills/components by name/description/category
+skills.search(query, kind="mcp")  # filter by kind (skill|mcp|loop|subagent|hook|plugin|prompt|tool)
 skills.list(category)  # enumerate a category / all
-skills.load(name)      # pull a skill's full instructions into context
-skills.categories      # browse categories with skill counts
+skills.load(name)      # pull a skill's instructions / a component's install info
+skills.categories      # browse categories with counts
 ```
 
 `jarvis doctor` reports the count and whether content is reachable. Point

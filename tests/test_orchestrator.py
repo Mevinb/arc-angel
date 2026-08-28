@@ -158,7 +158,7 @@ class TestSystemPrompt:
             def categories_with_counts(self):
                 return {"Testing": 20, "DevOps & Cloud": 300}
         prompt = build_system_prompt(None, None, ["skills.search"], skills=FakeSkills())
-        assert "# Skill library" in prompt
+        assert "# Skill & component library" in prompt
         assert 'skills.search("<topic>")' in prompt
         assert 'skills.load("<name>")' in prompt
         assert "Available categories:" in prompt
@@ -166,7 +166,7 @@ class TestSystemPrompt:
 
     def test_no_skill_section_without_library(self):
         prompt = build_system_prompt(None, None, ["x"])
-        assert "# Skill library" not in prompt
+        assert "# Skill" not in prompt
 
     def test_skill_section_absent_for_empty_library(self):
         class FakeSkills:

@@ -17,15 +17,19 @@ from .index import SkillLibrary, SkillEntry
 
 class SkillsSearchTool(Tool):
     name = "skills.search"
-    description = ("Search the installed SKILL.md skill library for a task or "
-                   "domain (e.g. 'sql performance', 'react testing', 'gcp "
-                   "deployment'). Returns matching skill names with the "
-                   "category and description so you can pick one to load.")
+    description = ("Search the installed skill & component library for a task "
+                   "or domain (e.g. 'sql performance', 'react testing', 'gcp "
+                   "deployment', 'filesystem mcp', 'git branch skill'). Returns "
+                   "matching entries — expert SKILL.md skills plus catalog "
+                   "components (MCPs, loops, subagents, hooks, plugins, prompts, "
+                   "CLI tools) — with kind, category and description so you can "
+                   "pick one to load.")
     risk = RiskLevel.GREEN
     parameters = {
         "properties": {
             "query": {"type": "string", "description": "Task or domain to search for"},
             "limit": {"type": "integer", "description": "Max results (default 10)"},
+            "kind": {"type": "string", "description": "Optional filter: skill, mcp, loop, subagent, hook, plugin, prompt, tool"},
         },
         "required": ["query"],
     }
@@ -33,11 +37,14 @@ class SkillsSearchTool(Tool):
     def __init__(self, library: SkillLibrary) -> None:
         self.library = library
 
-    def run(self, query: str = "", limit: int = 10, **_: Any) -> ToolResult:
+    def run(self, query: str = "", limit: int = 10, kind: str = "", **_: Any) -> ToolResult:
         if not self.library.count:
             return ToolResult.failure("No skills indexed. Run `jarvis skills "
                                       "install` to install the collection.")
         results = self.library.search(query, limit=max(1, int(limit)))
+        if kind:
+            kind = kind.strip().lower()
+            results = [e for e in results if (e.kind or "skill") == kind]
         if not results:
             return ToolResult.failure(f"No skills match {query!r}. Try "
                                       "`skills.categories` or a broader term.")
@@ -85,13 +92,15 @@ class SkillsListTool(Tool):
 
 class SkillsLoadTool(Tool):
     name = "skills.load"
-    description = ("Load the full instructions of a named skill (from "
-                   "`skills.search`) so you can follow its guidance. Returns "
-                   "the complete SKILL.md content as context.")
+    description = ("Load the full detail of a named skill or component (from "
+                   "`skills.search`). For an expert SKILL.md skill returns its "
+                   "complete instructions as context; for a catalog component "
+                   "(MCP/loop/hook/plugin/tool...) returns its description, "
+                   "source and the exact install command.")
     risk = RiskLevel.GREEN
     parameters = {
         "properties": {
-            "name": {"type": "string", "description": "Exact skill name to load"},
+            "name": {"type": "string", "description": "Exact name to load"},
         },
         "required": ["name"],
     }
@@ -109,11 +118,13 @@ class SkillsLoadTool(Tool):
             return ToolResult.failure(
                 f"Skill {name!r} is indexed but its content is not installed. "
                 "Run `jarvis skills install`.")
-        header = f"# Skill: {entry.name}\nCategory: {entry.category}\n"
+        kind = entry.kind or "skill"
+        header = f"# {kind.title()}: {entry.name}\nCategory: {entry.category}\n"
         return ToolResult.success(
             header + "\n" + content,
             name=entry.name,
             category=entry.category,
+            kind=kind,
             characters=len(content),
         )
 
@@ -138,7 +149,11 @@ class SkillsCategoriesTool(Tool):
 
 
 def _fmt_entry(entry: SkillEntry) -> str:
-    return (f"{entry.name}  [{entry.category}] — {entry.description}")
+    badge = f"({entry.kind})" if entry.kind else "(skill)"
+    if entry.name.endswith(f" {badge}"):
+        badge = ""  # name already carries the kind suffix (collision rename)
+    head = f"{entry.name}  {badge}".rstrip()
+    return f"{head} [{entry.category}] — {entry.description}"
 
 
 def register_skills_tools(registry: Any, library: SkillLibrary) -> None:
