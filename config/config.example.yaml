@@ -1,0 +1,44 @@
+# JARVIS configuration — copy to config/config.yaml and edit.
+# Environment variables (see .env.example) override these values.
+
+llm:
+  # Primary gateway: OmniRoute (OpenAI-compatible). Works with any
+  # OpenAI-compatible endpoint (OpenRouter, Ollama, LM Studio, vLLM...).
+  base_url: http://localhost:20128/v1
+  api_key: ""            # set via JARVIS_LLM_API_KEY
+  models:
+    fast: auto/fast      # quick classification, formatting, cheap calls
+    reasoning: auto      # planning, analysis, agent decisions
+    vision: auto         # screenshot understanding (needs a vision model)
+  # Fallback chains tried in order when a role's model fails.
+  fallbacks:
+    fast: ["auto", "gpt-4o-mini", "ollama/llama3.2"]
+    reasoning: ["auto/coding", "gpt-4o", "ollama/llama3.1"]
+    vision: ["auto", "gpt-4o"]
+  request:
+    timeout_seconds: 90
+    max_retries: 2
+
+safety:
+  # auto       -> green runs automatically, yellow/red are denied
+  # interactive-> green runs, yellow asks, red asks twice (default)
+  # yolo       -> everything runs without asking (NOT recommended)
+  mode: interactive
+
+internships:
+  # Sources enabled for the internship engine (Phase 6)
+  sources: ["remoteok", "arbeitnow", "hackernews"]
+  max_results_per_source: 40
+  # Use the LLM to refine match scores (slower, smarter)
+  llm_analysis: true
+  min_score_to_save: 20
+
+automation:
+  # Intervals in minutes for `jarvis automate` (Phase 11)
+  email_check_minutes: 30
+  job_search_minutes: 360
+  deadline_check_minutes: 60
+
+gmail:
+  credentials_path: data/gmail-credentials.json
+  token_path: data/gmail-token.json

@@ -1,0 +1,21 @@
+# Runtime data — never commit
+data/
+
+# Secrets
+.env
+config/config.yaml
+gmail-credentials.json
+gmail-token.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Browser artifacts
+screenshots/
+.playwright/
