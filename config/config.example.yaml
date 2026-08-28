@@ -42,3 +42,22 @@ automation:
 gmail:
   credentials_path: data/gmail-credentials.json
   token_path: data/gmail-token.json
+
+voice:
+  # Always-listening, full-duplex, local on RTX 4050 6GB
+  # STT: faster-whisper (small=500MB VRAM, medium=1.5GB) — local, no cloud
+  # TTS: auto → kokoro (~2GB VRAM, best) → piper → pyttsx3 (espeak)
+  # Install: pip install -e ".[voice]"  (+ pip install -e ".[kokoro]" for Kokoro)
+  # System: sudo apt install portaudio19-dev espeak espeak-data
+  enabled: false
+  stt: faster-whisper
+  stt_model: small
+  stt_language: en
+  tts: auto
+  tts_voice: af_heart
+  device: auto
+  always_listening: true
+  full_duplex: true
+  allow_voice_approval: true
+  vad_aggressiveness: 2
+  confidence_threshold: 0.6

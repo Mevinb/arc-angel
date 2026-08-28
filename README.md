@@ -16,7 +16,7 @@
   <a href="https://github.com/Mevinb/arc-angel"><img alt="python" src="https://img.shields.io/badge/python-3.11%2B-blue"></a>
   <a href="https://github.com/diegosouzapw/OmniRoute"><img alt="omniroute" src="https://img.shields.io/badge/LLM-OmniRoute%20%7C%20OpenAI--compatible-7c3aed"></a>
   <img alt="skills" src="https://img.shields.io/badge/skills-5415%20indexed-0ea5e9">
-  <img alt="tests" src="https://img.shields.io/badge/tests-135%20passing-22c55e">
+  <img alt="tests" src="https://img.shields.io/badge/tests-152%20passing-22c55e">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
 
@@ -53,6 +53,7 @@ No cloud lock-in. No account required. Bring your own model.
 | 10 | `arc/ui/terminal.py` + `arc/cli.py` | Rich REPL, markdown, tool activity, slash commands |
 | 11 | `arc/automation/scheduler.py` | Scheduled email checks, job sweeps, deadline pings (forced `auto` mode) |
 | 12 | `arc/skills/` | 5,415-component searchable library, progressive disclosure |
+| 13 | `arc/voice/` | Always-listening, full-duplex voice — faster-whisper STT + Kokoro/piper TTS, local on RTX 4050 |
 
 ---
 
@@ -114,6 +115,8 @@ arc skills search "filesystem"   # search library
 arc skills search "mcp" --kind mcp
 arc skills categories            # browse 96 categories
 arc skills add-source            # add awesome-ai-agent-tools catalog
+arc voice                        # live voice — always listening, full duplex
+arc voice --once "hi"            # one-shot voice without mic
 arc doctor                       # health check
 arc init                         # guided setup
 ```
@@ -177,6 +180,30 @@ In-agent tools: `skills.search(query, kind?)` · `skills.list(category)` · `ski
 
 ---
 
+## Voice — always listening, full duplex, local
+
+ARC talks and listens in real time, no cloud, no cost — on your RTX 4050 6GB:
+
+- **Always listening** — VAD (`webrtcvad` aggressiveness 2) gates silence, `faster-whisper` small (500MB VRAM, `medium` 1.5GB also fits) on CUDA transcribes in ~300ms
+- **Full duplex** — interrupt ARC mid-sentence (barge-in); it stops TTS and listens. Just talk like a human
+- **Local TTS** — `auto` picks the best available: **Kokoro** (~2GB VRAM, neural, 82M, best quality) → **piper** (CPU, <100MB) → **pyttsx3** (`espeak`, fallback). Kokoro used if VRAM allows
+- **Permission via talking** — YELLOW/RED: ARC asks out loud, you say *“yes / yeah go ahead / approve”* or *“no / cancel / don't do it”* in natural language; low confidence (<0.6) falls back to text `Confirm`
+
+```bash
+pip install -e ".[voice]"              # faster-whisper + webrtcvad + pyttsx3 + sounddevice
+pip install -e ".[voice,kokoro]"       # + Kokoro (needs ~2GB VRAM, best voice: af_heart)
+sudo apt install portaudio19-dev espeak espeak-data  # system deps (Linux)
+
+arc voice                              # always-listening, full duplex — say "exit" to stop
+arc voice --once "summarize my inbox"  # one-shot without mic (for testing/CI)
+arc voice --stt-model medium --tts piper  # medium whisper + piper
+arc voice --no-voice-approval          # approvals always via text, never voice
+```
+
+Config via `.env` (`ARC_VOICE_STT_MODEL`, `ARC_VOICE_TTS`, `ARC_VOICE_DEVICE=auto/cuda/cpu`) or `config.yaml` `voice:` section. See `.env.example` and `config/config.example.yaml`.
+
+---
+
 ## Optional engines
 
 ```bash
@@ -195,7 +222,7 @@ pip install -e ".[all]"       # everything
 
 ```bash
 pip install -e ".[dev]"
-pytest                        # 135 tests, no network/LLM needed
+pytest                        # 152 tests, no network/LLM needed
 python -m compileall -q arc
 ```
 
@@ -214,7 +241,12 @@ arc/
 ├── safety/             # permissions & risk classification
 ├── ui/                 # rich terminal UI
 ├── automation/         # scheduler
-└── skills/             # index, tools, installer
+├── skills/             # index, tools, installer
+└── voice/              # always-listening full-duplex — STT/VAD/TTS/session
+    ├── stt.py          # faster-whisper on CUDA (RTX 4050)
+    ├── tts.py          # Kokoro → piper → pyttsx3 (local)
+    ├── vad.py          # webrtcvad
+    └── session.py      # full-duplex + voice approval in human language
 ```
 
 ---

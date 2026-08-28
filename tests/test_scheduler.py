@@ -50,12 +50,16 @@ class TestScheduler:
         from arc.app import ArcApp
         config = load_config(project_root=tmp_path)
         config.safety_mode = "auto"
+        # Force a non-existent credentials path so test is isolated from
+        # the developer's real data/gmail-credentials.json (which may exist).
+        config.gmail["credentials_path"] = str(tmp_path / "nope-credentials.json")
+        config.gmail["token_path"] = str(tmp_path / "nope-token.json")
         app = ArcApp(config=config, quiet=True)
         try:
             result = Scheduler(app).run_task("email_check")
             # Not installed / no credentials → graceful skip, not a crash.
             assert result.ok
-            assert "skipped" in result.output
+            assert "skipped" in result.output.lower()
         finally:
             app.close()
 

@@ -15,6 +15,8 @@ Subcommands:
   arc skills categories    list skill categories
   arc skills install       clone/install the skill collection
   arc skills add-source    add a catalog source (e.g. awesome-ai-agent-tools)
+  arc voice                live voice — always-listening, full duplex, local
+  arc voice --once "hi"    one-shot voice query (no mic)
 """
 
 from __future__ import annotations
@@ -101,7 +103,21 @@ def _build_parser() -> argparse.ArgumentParser:
     skills_add.add_argument("--name", default="",
                             help="source name/dir (defaults to repo basename)")
     skills_add.add_argument("--source", default="",
-                            help="local copy source dir (skips network clone)")
+                             help="local copy source dir (skips network clone)")
+
+    voice = subparsers.add_parser("voice", help="live voice — always-listening, full duplex (local RTX 4050)")
+    voice.add_argument("--once", nargs="*", default=None,
+                       help="one-shot voice query as text (no mic, for testing)")
+    voice.add_argument("--stt", default="",
+                       help="STT: faster-whisper | fake (default from config)")
+    voice.add_argument("--stt-model", default="",
+                       help="whisper model: tiny/small/medium/large-v3 (default small)")
+    voice.add_argument("--tts", default="",
+                       help="TTS: auto | kokoro | piper | pyttsx3 | fake")
+    voice.add_argument("--device", default="",
+                       help="device: auto | cuda | cpu")
+    voice.add_argument("--no-voice-approval", action="store_true",
+                       help="disable voice approvals — always use text Confirm")
     return parser
 
 
@@ -341,6 +357,96 @@ def _cmd_doctor(app: ArcApp) -> int:
     return 0 if llm["ok"] else 1
 
 
+def _cmd_voice(app: ArcApp, args: argparse.Namespace) -> int:
+    from rich.console import Console
+    console = Console()
+
+    # One-shot mode: no mic needed, just handle text via voice pipeline (for testing)
+    if args.once is not None:
+        text = " ".join(args.once).strip()
+        if not text:
+            console.print("[yellow]Provide text after --once, e.g. `arc voice --once \"hello\"`[/yellow]")
+            return 1
+        # One-shot uses FakeSTT/FakeTTS if real deps missing, but still goes through voice session + approval path
+        try:
+            from .voice import FakeSTT, FakeTTS, VoiceSession
+            stt = FakeSTT(script=[text])
+            tts = FakeTTS()
+            session = VoiceSession(app, stt=stt, tts=tts, allow_voice_approval=not args.no_voice_approval)
+            reply = session.handle_once(text)
+            console.print(f"[dim]voice once → {reply[:400] if reply else '(no reply)'}[/dim]")
+            return 0
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]Voice once failed:[/red] {exc}")
+            return 1
+
+    # Live mode: always-listening full duplex, local on RTX 4050
+    voice_cfg = getattr(app.config, "voice", {}) or {}
+    stt_kind = (args.stt or voice_cfg.get("stt") or "faster-whisper").lower()
+    stt_model = args.stt_model or voice_cfg.get("stt_model") or "small"
+    tts_kind = (args.tts or voice_cfg.get("tts") or "auto").lower()
+    device = (args.device or voice_cfg.get("device") or "auto").lower()
+    allow_voice_approval = (not args.no_voice_approval) and bool(voice_cfg.get("allow_voice_approval", True))
+
+    # Lazy imports so `arc` still works without voice deps
+    try:
+        from .voice.stt import FasterWhisperSTT, FakeSTT
+        from .voice.tts import make_tts
+        from .voice.session import VoiceSession
+        from .voice.vad import VADDetector
+    except ImportError as exc:
+        console.print(f"[red]Voice deps missing:[/red] {exc}")
+        console.print("Install with: [cyan]pip install -e \".[voice]\"[/cyan]  (add [kokoro] for Kokoro)")
+        console.print("System deps: [cyan]sudo apt install portaudio19-dev espeak espeak-data[/cyan]")
+        return 1
+
+    # STT: faster-whisper on CUDA (4050 6GB) — small is 500MB, medium 1.5GB
+    if stt_kind == "fake":
+        stt = FakeSTT(script=[])
+    else:
+        try:
+            stt = FasterWhisperSTT(model=stt_model, device=device)
+            if not stt.available:
+                raise RuntimeError("faster-whisper not available")
+            console.print(f"[dim]STT: faster-whisper {stt_model} on {stt.device} ({stt.compute_type})[/dim]")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]FasterWhisper failed ({exc}) — using FakeSTT (no mic).[/yellow]")
+            stt = FakeSTT(script=[])
+
+    # TTS: auto → kokoro (if VRAM) → piper → pyttsx3
+    try:
+        tts = make_tts(kind=tts_kind, device=device)
+        console.print(f"[dim]TTS: {tts.name} (available={tts.available})[/dim]")
+        if not tts.available:
+            raise RuntimeError("no TTS available")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]TTS init failed:[/red] {exc}")
+        from .voice.tts import FakeTTS as _FakeTTS
+        tts = _FakeTTS()
+
+    # Check mic
+    try:
+        import sounddevice as sd  # type: ignore
+        # quick device check
+        devs = sd.query_devices()
+        console.print(f"[dim]Audio devices: {len(devs)} found[/dim]")
+    except Exception:
+        console.print("[yellow]sounddevice not available — voice will use text fallback for approvals.[/yellow]")
+
+    vad = VADDetector(aggressiveness=int(voice_cfg.get("vad_aggressiveness", 2)))
+
+    session = VoiceSession(
+        app=app,
+        stt=stt,
+        tts=tts,
+        vad=vad,
+        console=console,
+        allow_voice_approval=allow_voice_approval,
+        confidence_threshold=float(voice_cfg.get("confidence_threshold", 0.6)),
+    )
+    return 0 if session.run_forever() is None else 0  # run_forever handles its own exit
+
+
 def _cmd_init() -> int:
     from rich.console import Console
     from rich.prompt import Prompt
@@ -430,6 +536,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _cmd_email(app, args)
         if command == "skills":
             return _cmd_skills(app, args)
+        if command == "voice":
+            return _cmd_voice(app, args)
         if command == "doctor":
             return _cmd_doctor(app)
         parser.error(f"Unknown command: {command}")

@@ -55,6 +55,20 @@ DEFAULTS: Dict[str, Any] = {
         "credentials_path": "data/gmail-credentials.json",
         "token_path": "data/gmail-token.json",
     },
+    "voice": {
+        "enabled": False,
+        "stt": "faster-whisper",
+        "stt_model": "small",
+        "stt_language": "en",
+        "tts": "auto",
+        "tts_voice": "af_heart",
+        "device": "auto",
+        "always_listening": True,
+        "full_duplex": True,
+        "allow_voice_approval": True,
+        "vad_aggressiveness": 2,
+        "confidence_threshold": 0.6,
+    },
 }
 
 _ENV_OVERRIDES = {
@@ -62,6 +76,10 @@ _ENV_OVERRIDES = {
     ("llm", "api_key"): "ARC_LLM_API_KEY",
     ("safety", "mode"): "ARC_SAFETY_MODE",
     ("skills", "root"): "ARC_SKILLS_ROOT",
+    ("voice", "stt"): "ARC_VOICE_STT",
+    ("voice", "stt_model"): "ARC_VOICE_STT_MODEL",
+    ("voice", "tts"): "ARC_VOICE_TTS",
+    ("voice", "device"): "ARC_VOICE_DEVICE",
 }
 _ENV_MODEL_OVERRIDES = {
     "fast": "ARC_MODEL_FAST",
@@ -149,6 +167,7 @@ class ArcConfig:
     automation: Dict[str, Any]
     gmail: Dict[str, str]
     skills: Dict[str, str] = field(default_factory=dict)
+    voice: Dict[str, Any] = field(default_factory=dict)
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
     config_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "config.yaml")
 
@@ -214,6 +233,44 @@ def load_config(project_root: Path | None = None,
     ))
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Voice config with typed defaults
+    voice_raw = raw.get("voice", {})
+    voice = {
+        "enabled": bool(voice_raw.get("enabled", False)),
+        "stt": str(voice_raw.get("stt", "faster-whisper")),
+        "stt_model": str(voice_raw.get("stt_model", "small")),
+        "stt_language": str(voice_raw.get("stt_language", "en")),
+        "tts": str(voice_raw.get("tts", "auto")),
+        "tts_voice": str(voice_raw.get("tts_voice", "af_heart")),
+        "device": str(voice_raw.get("device", "auto")),
+        "always_listening": bool(voice_raw.get("always_listening", True)),
+        "full_duplex": bool(voice_raw.get("full_duplex", True)),
+        "allow_voice_approval": bool(voice_raw.get("allow_voice_approval", True)),
+        "vad_aggressiveness": int(voice_raw.get("vad_aggressiveness", 2)),
+        "confidence_threshold": float(voice_raw.get("confidence_threshold", 0.6)),
+    }
+    # Env overrides for voice (catch-all for ARC_VOICE_*)
+    for key in list(voice.keys()):
+        env_name = f"ARC_VOICE_{key.upper()}"
+        val = env_value(env_name)
+        if val is not None:
+            # coerce to same type as default
+            default = voice[key]
+            if isinstance(default, bool):
+                voice[key] = val.lower() in ("1", "true", "yes", "on")
+            elif isinstance(default, int):
+                try:
+                    voice[key] = int(val)
+                except ValueError:
+                    pass
+            elif isinstance(default, float):
+                try:
+                    voice[key] = float(val)
+                except ValueError:
+                    pass
+            else:
+                voice[key] = val
+
     return ArcConfig(
         llm=llm,
         safety_mode=str(raw.get("safety", {}).get("mode", "interactive")).lower(),
@@ -221,6 +278,7 @@ def load_config(project_root: Path | None = None,
         automation=dict(raw.get("automation", {})),
         gmail={k: str(v) for k, v in raw.get("gmail", {}).items()},
         skills={k: str(v) for k, v in raw.get("skills", {}).items()},
+        voice=voice,
         data_dir=data_dir,
         config_path=config_yaml,
     )
