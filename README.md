@@ -3,13 +3,13 @@
 > **LLM routing • email triage • internship hunting • browser & computer control** — all behind a safety-first, tool-using agent loop that actually does work for you.
 
 ```
-      ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
-      ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
-      ██║███████║██████╔╝██║   ██║██║███████╗
- ██   ██║██╔══██╗██╔══██╗╚██╗ ██╔╝██║╚════██║
-╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
- ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
- — personal AI assistant that doesn't ask you to do its job
+         █████╗ ██████╗  ██████╗
+        ██╔══██╗██╔══██╗██╔════╝
+        ███████║██████╔╝██║
+        ██╔══██║██╔══██╗██║
+        ██║  ██║██║  ██║╚██████╗
+        ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝
+         — personal AI assistant that doesn't ask you to do its job
 ```
 
 <p>
