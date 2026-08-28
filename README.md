@@ -32,10 +32,27 @@ permission system — all orchestrated through a tool-using agent loop.
 
 ## Quick start
 
+The fastest way to get the exact system the author runs — JARVIS routed through
+an OmniRoute LLM gateway, with optional Gmail/browser/computer extras and the
+SKILL.md library — is the one-command installer:
+
+```bash
+git clone https://github.com/Mevinb/arc-angel.git && cd arc-angel
+./install.sh                 # venv + JARVIS + OmniRoute + skills library
+./start.sh                   # start the gateway and launch JARVIS chat
+```
+
+`install.sh --help` lists flags (`--no-omniroute`, `--no-skills`, `--extras`,
+`--all`). It creates your `.env`/`config` only if missing, never overwrites
+them, needs no account, and commits nothing.
+
+Manual setup (equivalent):
+
 ```bash
 # Python 3.11+
 uv v && source .venv/bin/activate   # or: python -m venv .venv
 uv pip install -e .                 # or: pip install -e .
+npm install -g omniroute            # LLM gateway (or use any OpenAI-compatible one)
 
 jarvis init       # create config.yaml, .env and your profile
 jarvis doctor     # verify the LLM gateway, tools and database
