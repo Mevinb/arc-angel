@@ -1,217 +1,226 @@
-# ARC — Personal AI Assistant
+# ARC — your personal AI angel
 
-A personal AI assistant built in Python: LLM routing, email triage, an
-internship search engine, web/computer control, and a safety-first
-permission system — all orchestrated through a tool-using agent loop.
+> **LLM routing • email triage • internship hunting • browser & computer control** — all behind a safety-first, tool-using agent loop that actually does work for you.
 
 ```
       ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
       ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
       ██║███████║██████╔╝██║   ██║██║███████╗
  ██   ██║██╔══██╗██╔══██╗╚██╗ ██╔╝██║╚════██║
- ╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
-  ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
+╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
+ ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
+ — personal AI assistant that doesn't ask you to do its job
 ```
 
-## Architecture (11 phases)
+<p>
+  <a href="https://github.com/Mevinb/arc-angel"><img alt="python" src="https://img.shields.io/badge/python-3.11%2B-blue"></a>
+  <a href="https://github.com/diegosouzapw/OmniRoute"><img alt="omniroute" src="https://img.shields.io/badge/LLM-OmniRoute%20%7C%20OpenAI--compatible-7c3aed"></a>
+  <img alt="skills" src="https://img.shields.io/badge/skills-5415%20indexed-0ea5e9">
+  <img alt="tests" src="https://img.shields.io/badge/tests-135%20passing-22c55e">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-lightgrey">
+</p>
 
-| Phase | Module | What it does |
-|-------|--------|--------------|
-| 1 | `arc/core/llm.py` | **OmniRoute LLM routing** — role-based model selection (fast / reasoning / vision) with automatic fallback chains and failure cooldowns. Works with any OpenAI-compatible gateway. |
-| 2 | `arc/core/orchestrator.py` | **Python orchestrator** — tool-using agent loop: message → LLM → tool calls → results → final answer. Bounded iterations, full audit log. |
-| 3 | `arc/tools/computer.py` | **Computer control** — hardened shell/Python tools with static command risk analysis; optional Open Interpreter backend. |
-| 4 | `arc/tools/browser.py` | **Browser automation** — dependency-free `web.fetch`, optional Playwright (`browser.open`) and Browser-Use (`browser.task`). |
-| 5 | `arc/tools/email_engine.py` | **Gmail engine** — OAuth, search, LLM classification (recruiter / interview / application update / rejection), digest, drafts. Sending is RED-gated. |
-| 6 | `arc/internships/` | **Internship engine** — live sources (RemoteOK, Arbeitnow, Hacker News Who-is-hiring), heuristic + LLM scoring against your profile, ranking, SQLite tracker. |
-| 7 | `arc/profile/`, `arc/tools/personal.py` | **Personal profile & memory** — resume in YAML, rolling conversation memory, durable long-term memory in SQLite. |
-| 8 | `arc/db/database.py` | **SQLite persistence** — jobs, recruiters, email threads, events/deadlines, memory. WAL, thread-safe. |
-| 9 | `arc/safety/permissions.py` | **Safety & permissions** — GREEN / YELLOW / RED risk levels, blocked + dangerous command patterns, approval prompts, `auto` / `interactive` / `yolo` modes. |
-| 10 | `arc/ui/terminal.py`, `arc/cli.py` | **Terminal UI** — rich REPL with Markdown replies, tool activity, approval prompts, slash commands. |
-| 11 | `arc/automation/scheduler.py` | **Automation** — scheduled email checks, job searches and deadline reminders, always in `auto` safety mode. |
-| 12 | `arc/skills/` | **Skill library** — search the bundled ~4.7k `SKILL.md` skills (Anthropic format) and load one's instructions on demand as context for the agent. |
+**ARC** is not a chatbot wrapper. It's a local agent that lives on your machine, talks to whatever LLM you point it at, and uses real tools to handle real work: triage your inbox, hunt internships across 3 boards and rank them against your profile, control your browser/computer, remember who your recruiters are, and not nuke your system while doing it.
 
-## Quick start
+No cloud lock-in. No account required. Bring your own model.
 
-The fastest way to get the exact system the author runs — ARC routed through
-an OmniRoute LLM gateway, with optional Gmail/browser/computer extras and the
-SKILL.md library — is the one-command installer:
+---
+
+## What it actually does
+
+- **Talks through OmniRoute** — role-based routing (`fast` / `reasoning` / `vision`) with fallback chains and cooldowns. Any OpenAI-compatible gateway works (OmniRoute, OpenRouter, Ollama, LM Studio, vLLM).
+- **Reads & triages Gmail** — OAuth, LLM classification (recruiter / interview / update / rejection), digests, and draft replies. Sending is `RED`-gated — it will never send without you confirming.
+- **Hunts internships** — scrapes RemoteOK, Arbeitnow, Hacker News Who-is-hiring, scores every listing heuristically *and* with the LLM against your `data/profile.yaml`, tracks deadlines.
+- **Controls your machine** — shell/Python with static risk analysis, `web.fetch`, Playwright + Browser-Use. Dangerous commands (`rm -rf /`, `mkfs`, fork bombs) are refused outright.
+- **Remembers** — SQLite (WAL) for jobs/recruiters/threads/events + rolling context + durable long-term memory.
+- **Knows 5k+ skills** — searchable `SKILL.md` library (Anthropic format) + catalog sources (MCPs, loops, subagents, hooks, plugins, prompts, tools) loaded on demand so context stays lean.
+
+---
+
+## Architecture
+
+| # | Module | What it does |
+|---|--------|-------------|
+| 1 | `arc/core/llm.py` | OmniRoute routing, fallback chains, failure cooldowns |
+| 2 | `arc/core/orchestrator.py` | Agent loop: message → LLM → tool calls → results → answer |
+| 3 | `arc/tools/computer.py` | Hardened shell/Python (optional Open Interpreter) |
+| 4 | `arc/tools/browser.py` | `web.fetch`, `browser.open` (Playwright), `browser.task` (Browser-Use) |
+| 5 | `arc/tools/email_engine.py` | Gmail OAuth, search, classification, digest, draft generation |
+| 6 | `arc/internships/` | Multi-source aggregation + heuristic/LLM scoring |
+| 7 | `arc/profile/` + `arc/tools/personal.py` | Resume in YAML + memory (rolling + durable) |
+| 8 | `arc/db/database.py` | SQLite, WAL, thread-safe |
+| 9 | `arc/safety/permissions.py` | GREEN / YELLOW / RED + blocked patterns + `auto`/`interactive`/`yolo` |
+| 10 | `arc/ui/terminal.py` + `arc/cli.py` | Rich REPL, markdown, tool activity, slash commands |
+| 11 | `arc/automation/scheduler.py` | Scheduled email checks, job sweeps, deadline pings (forced `auto` mode) |
+| 12 | `arc/skills/` | 5,415-component searchable library, progressive disclosure |
+
+---
+
+## Quick start — 30 seconds
+
+**One-command installer** (venv + ARC + OmniRoute + skills):
 
 ```bash
 git clone https://github.com/Mevinb/arc-angel.git && cd arc-angel
-./install.sh                 # venv + ARC + OmniRoute + skills library
-./start.sh                   # start the gateway and launch ARC chat
+./install.sh              # needs: python 3.11+, node 18+
+./start.sh                # starts gateway, launches ARC chat
 ```
 
-`install.sh --help` lists flags (`--no-omniroute`, `--no-skills`, `--extras`,
-`--all`). It creates your `.env`/`config` only if missing, never overwrites
-them, needs no account, and commits nothing.
+`install.sh` never overwrites your `.env`/`config` — it only creates them if missing. Flags: `--no-omniroute`, `--no-skills`, `--extras all`, `--all`, `--help`.
 
-Manual setup (equivalent):
+**Manual:**
 
 ```bash
-# Python 3.11+
-uv v && source .venv/bin/activate   # or: python -m venv .venv
-uv pip install -e .                 # or: pip install -e .
-npm install -g omniroute            # LLM gateway (or use any OpenAI-compatible one)
+python -m venv .venv && source .venv/bin/activate
+pip install -e .                  # or: uv pip install -e .
+npm install -g omniroute          # or point ARC at any OpenAI-compatible URL
 
-arc init       # create config.yaml, .env and your profile
-arc doctor     # verify the LLM gateway, tools and database
-arc            # start chatting
+arc init                          # creates config.yaml, .env, your profile
+arc doctor                        # checks gateway, tools, DB, skills
+arc                               # chat
 ```
 
-### Connecting an LLM
+### Plug in any LLM
 
-ARC talks to any OpenAI-compatible endpoint. The default targets
-[OmniRoute](https://github.com/diegosouzapw/OmniRoute) at
-`http://localhost:20128/v1`:
+ARC just needs an OpenAI-compatible endpoint. Default is OmniRoute on `localhost:20128`:
 
 ```bash
 # .env
 ARC_LLM_BASE_URL=http://localhost:20128/v1
-ARC_LLM_API_KEY=your-key
+ARC_LLM_API_KEY=sk-...
+ARC_MODEL_FAST=auto/fast
+ARC_MODEL_REASONING=auto/reasoning
+ARC_MODEL_VISION=auto/vision
 ```
 
-Everything degrades gracefully without an LLM: job matching falls back to
-heuristic scoring, email classification to keyword rules, and the agent
-answers with a clear "gateway unreachable" message.
+No LLM? It still works — matching falls back to heuristics, email to keyword rules, and the agent tells you the gateway is unreachable instead of hallucinating.
+
+---
 
 ## Commands
 
+```bash
+arc                              # interactive chat (default)
+arc ask "summarize my inbox"     # one-shot
+arc jobs search                  # search boards, score vs profile, save
+arc jobs list --min-score 50     # filter saved jobs
+arc jobs analyze 42              # requirements, gaps, pitch
+arc jobs email 42                # draft recruiter email (never auto-sends)
+arc email digest                 # classify recent mail
+arc email search "SDE intern"    # Gmail search
+arc automate run all             # run scheduled tasks once
+arc automate start               # scheduler loop
+arc skills search "filesystem"   # search library
+arc skills search "mcp" --kind mcp
+arc skills categories            # browse 96 categories
+arc skills add-source            # add awesome-ai-agent-tools catalog
+arc doctor                       # health check
+arc init                         # guided setup
 ```
-arc                      interactive chat (default)
-arc ask "question"       one-shot question
-arc jobs search          search boards, score, save
-arc jobs list [--status applied] [--min-score 50]
-arc jobs analyze ID      deep analysis: requirements, gaps, pitch
-arc jobs email ID        draft a recruiter email (never sends)
-arc email digest         classify recent mail
-arc email search QUERY   Gmail search
-arc automate run all     run all scheduled tasks once
-arc automate start       run the scheduler loop
-arc skills search Q      search the SKILL.md library
-arc skills list          list skills (--category, --limit)
-arc skills categories    list categories with counts
-arc skills install       clone/install the collection
-arc doctor               health check
-arc init                 guided setup
-```
 
-In the chat REPL: `/help` `/tools` `/new` `/doctor` `/stats` `/mode` `/quit`.
+Inside the REPL: `/help` `/tools` `/new` `/doctor` `/stats` `/mode` `/quit`
 
-## Safety model
+---
 
-Every tool call is classified before it runs:
+## Safety — it asks before it wrecks
 
-- **GREEN** — read-only (fetch a page, search jobs, read mail): runs automatically.
-- **YELLOW** — creates things (drafts, shell commands, job status changes): asks first.
-- **RED** — irreversible (send email, submit applications): asks first, loudly.
+Every tool call is classified *before* execution:
 
-Blocked shell patterns (`rm -rf /`, `mkfs`, fork bombs, …) are refused
-outright, regardless of approval. Modes:
+- **GREEN** — read-only (fetch page, search jobs, read mail) → runs
+- **YELLOW** — creates things (drafts, shell commands, status changes) → asks
+- **RED** — irreversible (send email, submit) → asks loudly
 
-| Mode | Behaviour |
-|------|-----------|
-| `interactive` (default) | GREEN runs; YELLOW/RED prompt the human |
-| `auto` | GREEN runs; YELLOW/RED denied — used by the scheduler |
-| `yolo` | everything runs (explicit opt-in, discouraged) |
+Blocked patterns are refused even in `yolo`:
+
+| Mode | Behavior |
+|------|----------|
+| `interactive` *(default)* | GREEN runs, YELLOW/RED prompt |
+| `auto` | GREEN runs, YELLOW/RED denied — used by the scheduler |
+| `yolo` | everything runs (you asked for it) |
+
+---
 
 ## Configuration
 
-Precedence: environment (`ARC_*`) → `config/config.yaml` → built-in
-defaults. See `config/config.example.yaml` and `.env.example` for all keys:
-LLM endpoints and models, safety mode, internship sources and thresholds,
-automation intervals, Gmail credential paths.
+Precedence: **env `ARC_*` → `config/config.yaml` → defaults**. Legacy `JARVIS_*` vars still work as fallbacks (so old `.env` files don't break).
 
-Your profile lives in `data/profile.yaml` — education, skills, projects,
-preferred roles and locations. The matcher scores every listing against it,
-and the agent reads it for application answers and recruiter emails.
+See `.env.example` and `config/config.example.yaml` for everything: endpoints, models, safety mode, internship sources/thresholds, automation intervals, Gmail paths.
 
-## Skills (SKILL.md library)
+Your profile lives in `data/profile.yaml` — education, skills, projects, preferred roles/locations. ARC scores every job against it and uses it for drafts.
 
-ARC can discover and activate the `SKILL.md` skills from the bundled
-[ai-agent-skills-by-luo-kai](https://github.com/luokai0/ai-agent-skills-by-luo-kai)
-collection — ~4,700 indexed, 9,786 files total. These are progressive-disclosure
-*instructions* (Anthropic format): ARC keeps only the compact 1.1 MB
-searchable index hot and loads a single skill's full text on demand, so the
-agent can follow expert guidance without bloating its context.
+---
 
-Install the collection (clones or copies it, keeping a `content` pointer):
+## Skills library — 5,415 components, zero bloat
+
+ARC keeps a compact 1.1MB index hot and loads one skill's full text on demand (Anthropic `SKILL.md` progressive disclosure).
+
+- **Core:** ~4,700 skills from [ai-agent-skills-by-luo-kai](https://github.com/luokai0/ai-agent-skills-by-luo-kai) (9,786 files)
+- **Catalogs:** [awesome-ai-agent-tools](https://github.com/michielhdoteth/awesome-ai-agent-tools) and any catalog repo — adds **MCP servers, loops, subagents, hooks, plugins, prompts, tools** with source + install command
 
 ```bash
-arc skills install                 # clone from GitHub into data/skills
-arc skills install --source /path # copy from a local copy (no network)
+arc skills install                                    # clone into data/skills
+arc skills install --source /local/path --name x      # copy local, no network
+arc skills add-source                                 # add awesome-ai-agent-tools
+arc skills add-source --repo <url> --name <dir>       # any catalog
 ```
 
-Beyond the Luo-Kai `SKILL.md` collection, ARC also indexes catalog-style
-sources such as
-[awesome-ai-agent-tools](https://github.com/michielhdoteth/awesome-ai-agent-tools)
-(a curated library of AI-agent components). One catalog source adds hundreds of
-searchable entries — **MCP servers, agent loops, subagents, hooks, plugins,
-prompts and CLI tools** — each with its source, description and exact install
-command, discovered through the same `skills.search`/`skills.load` tools:
+Sources land in `<skills_root>/sources/<name>/` and are auto-discovered. Filter by kind:
 
 ```bash
-arc skills add-source                                    # clone awesome-ai-agent-tools
-arc skills add-source --repo <url> --name <dir>          # any catalog repo
-arc skills add-source --source /path/to/catalog --name x # copy from local (no network)
+arc skills search "filesystem" --kind mcp
+arc skills search "deploy" --kind plugin
 ```
 
-Sources land in `<skills_root>/sources/<name>/` and are auto-discovered on the
-next run. `skills.search(..., kind="mcp")` filters by component type, and
-`skills.load("Filesystem MCP")` returns the component's description, source and
-install command.
+In-agent tools: `skills.search(query, kind?)` · `skills.list(category)` · `skills.load(name)` · `skills.categories`
 
-Discover and use skills from the REPL or one-shot via the agent tools:
+`arc doctor` reports `5415 indexed (96 categories) — content ✓`. Override via `ARC_SKILLS_ROOT` or `skills.root` in `config.yaml`.
 
-```
-skills.search(query)   # find skills/components by name/description/category
-skills.search(query, kind="mcp")  # filter by kind (skill|mcp|loop|subagent|hook|plugin|prompt|tool)
-skills.list(category)  # enumerate a category / all
-skills.load(name)      # pull a skill's instructions / a component's install info
-skills.categories      # browse categories with counts
-```
-
-`arc doctor` reports the count and whether content is reachable. Point
-`ARC_SKILLS_ROOT` (or `skills.root` in `config.yaml`) at any directory
-holding `skills-index.json` + a `content/` subdir to override the collection.
+---
 
 ## Optional engines
 
 ```bash
-pip install -e ".[gmail]"      # Gmail API (google-api-python-client, google-auth)
-pip install -e ".[browser]"    # Playwright + Browser-Use
-pip install -e ".[computer]"   # Open Interpreter
-pip install -e ".[dev]"        # pytest, ruff
+pip install -e ".[gmail]"     # google-api-python-client, google-auth
+pip install -e ".[browser]"   # playwright + browser-use
+pip install -e ".[computer]"  # open-interpreter
+pip install -e ".[dev]"       # pytest + friends
+pip install -e ".[all]"       # everything
 ```
 
-Gmail needs an OAuth client JSON from Google Cloud Console at
-`data/gmail-credentials.json`; the token is cached after the first
-browser-based consent flow.
+**Gmail:** create an OAuth Desktop client in Google Cloud Console → download JSON → place at `data/gmail-credentials.json` (or set `ARC_GMAIL_CREDENTIALS`). First `arc email digest` opens a browser for consent and caches `data/gmail-token.json`.
+
+---
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 104 tests, no network or LLM required
+pytest                        # 135 tests, no network/LLM needed
+python -m compileall -q arc
 ```
 
-Tests fake the LLM client and network sources, so the whole agent loop,
-permission system and engines are covered offline.
-
-## Project layout
+Tests fake the LLM and network sources — full agent loop, permissions, and engines are covered offline.
 
 ```
 arc/
-├── app.py              # facade wiring everything together
+├── app.py              # facade wiring everything
 ├── cli.py              # argparse CLI
 ├── config.py           # env + YAML + defaults
 ├── core/               # llm router, orchestrator, memory, logging
-├── tools/              # tool framework + computer/browser/email/personal tools
+├── tools/              # tool framework + computer/browser/email/personal
 ├── internships/        # sources, matcher, engine
-├── profile/            # personal profile
-├── db/                 # SQLite persistence
+├── profile/            # YAML profile
+├── db/                 # SQLite
 ├── safety/             # permissions & risk classification
 ├── ui/                 # rich terminal UI
 ├── automation/         # scheduler
-└── skills/             # SKILL.md library (index, tools, installer)
+└── skills/             # index, tools, installer
 ```
+
+---
+
+## License
+
+MIT — do whatever you want, just don't blame us when ARC roasts your resume.
+
+<p align="center"><i>built for people who want an assistant that actually assists.</i></p>
