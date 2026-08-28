@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from jarvis.app import JarvisApp
-from jarvis.config import load_config
-from jarvis.safety.permissions import PermissionGuard
-from jarvis.skills.index import SkillLibrary
-from jarvis.skills.tools import (SkillsCategoriesTool, SkillsListTool,
+from arc.app import ArcApp
+from arc.config import load_config
+from arc.safety.permissions import PermissionGuard
+from arc.skills.index import SkillLibrary
+from arc.skills.tools import (SkillsCategoriesTool, SkillsListTool,
                                  SkillsLoadTool, SkillsSearchTool,
                                  register_skills_tools)
-from jarvis.tools.base import ToolRegistry
+from arc.tools.base import ToolRegistry
 
 QA_SKILL = """---
 name: qa-expert
@@ -337,7 +337,7 @@ class TestSkillsWiring:
         config.safety_mode = "auto"
         config.skills = {"root": str(tmp_path / "skills")}
         _make_index(tmp_path / "skills")
-        app = JarvisApp(config=config, quiet=True)
+        app = ArcApp(config=config, quiet=True)
         try:
             for name in ("skills.search", "skills.list", "skills.load",
                          "skills.categories"):
@@ -351,7 +351,7 @@ class TestSkillsWiring:
     def test_no_skills_root_still_works(self, tmp_path: Path):
         config = load_config(project_root=tmp_path)
         config.safety_mode = "auto"
-        app = JarvisApp(config=config, quiet=True)
+        app = ArcApp(config=config, quiet=True)
         try:
             # No skills dir -> no skill tools, but app still healthy.
             assert "skills.search" not in app.registry.names()
@@ -366,7 +366,7 @@ class TestSkillsWiring:
         _make_index(tmp_path / "skills")
         # add a catalog source under data/skills/sources/<name>/
         _make_catalog_root(tmp_path / "skills" / "sources" / "awesome")
-        app = JarvisApp(config=config, quiet=True)
+        app = ArcApp(config=config, quiet=True)
         try:
             # the catalog entries (mcps/loops/...) are indexed alongside skills
             hits = app.skills.search("filesystem")
@@ -379,10 +379,39 @@ class TestSkillsWiring:
             app.close()
 
 
+class TestLegacyEnvFallback:
+    def test_jarvis_skills_root_env(self, tmp_path: Path, monkeypatch):
+        from arc.skills.index import skill_library_from_env
+        monkeypatch.delenv("ARC_SKILLS_ROOT", raising=False)
+        monkeypatch.setenv("JARVIS_SKILLS_ROOT", str(tmp_path / "skills"))
+        _make_index(tmp_path / "skills")
+        lib = skill_library_from_env(project_root=tmp_path)
+        assert lib.root == tmp_path / "skills"
+
+    def test_arc_skills_root_env_beats_jarvis(self, tmp_path: Path, monkeypatch):
+        from arc.skills.index import skill_library_from_env
+        arc_root = tmp_path / "arc-skills"
+        jarvis_root = tmp_path / "jarvis-skills"
+        _make_index(arc_root); _make_index(jarvis_root)
+        monkeypatch.setenv("ARC_SKILLS_ROOT", str(arc_root))
+        monkeypatch.setenv("JARVIS_SKILLS_ROOT", str(jarvis_root))
+        lib = skill_library_from_env(project_root=tmp_path)
+        assert lib.root == arc_root
+
+    def test_jarvis_skills_root_dotenv(self, tmp_path: Path, monkeypatch):
+        from arc.skills.index import skill_library_from_env
+        monkeypatch.delenv("ARC_SKILLS_ROOT", raising=False)
+        monkeypatch.delenv("JARVIS_SKILLS_ROOT", raising=False)
+        _make_index(tmp_path / "skills")
+        (tmp_path / ".env").write_text(f"JARVIS_SKILLS_ROOT={tmp_path / 'skills'}\n")
+        lib = skill_library_from_env(project_root=tmp_path)
+        assert lib.root == tmp_path / "skills"
+
+
 # ---------------------------------------------------------------- install
 class TestInstallSource:
     def test_copy_local_source(self, tmp_path: Path):
-        from jarvis.skills.install import install_source
+        from arc.skills.install import install_source
         src = _make_catalog_root(tmp_path / "local-src")
         sources_root = tmp_path / "skills" / "sources"
         dest = install_source(sources_root, repo_url="https://github.com/x/y.git",
@@ -391,7 +420,7 @@ class TestInstallSource:
         assert dest.name == "awesome"
 
     def test_derives_name_from_repo_url(self, tmp_path: Path):
-        from jarvis.skills.install import install_source
+        from arc.skills.install import install_source
         dest = install_source(tmp_path / "sources",
                               repo_url="https://github.com/me/awesome-x.git",
                               source=_make_catalog_root(tmp_path / "s2"))

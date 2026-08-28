@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import json
 
-from jarvis.automation.scheduler import Scheduler
-from jarvis.config import load_config
+from arc.automation.scheduler import Scheduler
+from arc.config import load_config
 from tests.conftest import FakeMessage, FakeResponse, ScriptedClient
 
 
 class TestScheduler:
     def test_unknown_task_fails_cleanly(self, tmp_path):
-        from jarvis.app import JarvisApp
+        from arc.app import ArcApp
         config = load_config(project_root=tmp_path)
         config.safety_mode = "auto"
-        app = JarvisApp(config=config, quiet=True)
+        app = ArcApp(config=config, quiet=True)
         try:
             result = Scheduler(app).run_task("nope")
             assert not result.ok
@@ -24,7 +24,7 @@ class TestScheduler:
             app.close()
 
     def test_job_search_task_saves_jobs(self, tmp_path, monkeypatch):
-        import jarvis.internships.sources as sources
+        import arc.internships.sources as sources
 
         def fake_source(**_):
             return [sources.manual_job("Acme", "Backend Intern",
@@ -32,10 +32,10 @@ class TestScheduler:
                                        description="Python intern role")]
 
         monkeypatch.setattr(sources, "SOURCES", {"fake": fake_source})
-        from jarvis.app import JarvisApp
+        from arc.app import ArcApp
         config = load_config(project_root=tmp_path)
         config.safety_mode = "auto"
-        app = JarvisApp(config=config, quiet=True)
+        app = ArcApp(config=config, quiet=True)
         app.internships.source_names = ["fake"]
         try:
             scheduler = Scheduler(app)
@@ -47,10 +47,10 @@ class TestScheduler:
             app.close()
 
     def test_email_check_skipped_without_gmail(self, tmp_path):
-        from jarvis.app import JarvisApp
+        from arc.app import ArcApp
         config = load_config(project_root=tmp_path)
         config.safety_mode = "auto"
-        app = JarvisApp(config=config, quiet=True)
+        app = ArcApp(config=config, quiet=True)
         try:
             result = Scheduler(app).run_task("email_check")
             # Not installed / no credentials → graceful skip, not a crash.
@@ -62,10 +62,10 @@ class TestScheduler:
     def test_deadline_check_reports_events(self, tmp_path):
         from datetime import datetime, timedelta
 
-        from jarvis.app import JarvisApp
+        from arc.app import ArcApp
         config = load_config(project_root=tmp_path)
         config.safety_mode = "auto"
-        app = JarvisApp(config=config, quiet=True)
+        app = ArcApp(config=config, quiet=True)
         try:
             due = (datetime.now() + timedelta(days=2)).isoformat(timespec="seconds")
             app.db.add_event("deadline", due, "Acme application")
@@ -76,10 +76,10 @@ class TestScheduler:
             app.close()
 
     def test_task_intervals_respected(self, tmp_path):
-        from jarvis.app import JarvisApp
+        from arc.app import ArcApp
         config = load_config(project_root=tmp_path)
         config.safety_mode = "auto"
-        app = JarvisApp(config=config, quiet=True)
+        app = ArcApp(config=config, quiet=True)
         try:
             scheduler = Scheduler(app)
             task = scheduler.tasks["deadline_check"]

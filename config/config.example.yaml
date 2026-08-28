@@ -1,11 +1,11 @@
-# JARVIS configuration — copy to config/config.yaml and edit.
+# ARC configuration — copy to config/config.yaml and edit.
 # Environment variables (see .env.example) override these values.
 
 llm:
   # Primary gateway: OmniRoute (OpenAI-compatible). Works with any
   # OpenAI-compatible endpoint (OpenRouter, Ollama, LM Studio, vLLM...).
   base_url: http://localhost:20128/v1
-  api_key: ""            # set via JARVIS_LLM_API_KEY
+  api_key: ""            # set via ARC_LLM_API_KEY
   models:
     fast: auto/fast      # quick classification, formatting, cheap calls
     reasoning: auto      # planning, analysis, agent decisions
@@ -34,7 +34,7 @@ internships:
   min_score_to_save: 20
 
 automation:
-  # Intervals in minutes for `jarvis automate` (Phase 11)
+  # Intervals in minutes for `arc automate` (Phase 11)
   email_check_minutes: 30
   job_search_minutes: 360
   deadline_check_minutes: 60

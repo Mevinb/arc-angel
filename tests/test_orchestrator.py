@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 
-from jarvis.core.orchestrator import Orchestrator, build_system_prompt
-from jarvis.safety.permissions import PermissionGuard, RiskLevel
-from jarvis.tools.base import Tool, ToolRegistry, ToolResult
+from arc.core.orchestrator import Orchestrator, build_system_prompt
+from arc.safety.permissions import PermissionGuard, RiskLevel
+from arc.tools.base import Tool, ToolRegistry, ToolResult
 from tests.conftest import (ExplodingClient, FakeMessage, FakeResponse,
                             FakeToolCall, make_router)
 
@@ -133,8 +133,8 @@ class TestAgentLoop:
 
 class TestSystemPrompt:
     def test_contains_profile_and_memory(self, profile):
-        from jarvis.core.memory import LongTermMemory
-        from jarvis.db.database import Database
+        from arc.core.memory import LongTermMemory
+        from arc.db.database import Database
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:

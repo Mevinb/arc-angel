@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-import jarvis.internships.sources as sources
-from jarvis.internships.sources import _looks_like_internship, fetch_all, manual_job
+import arc.internships.sources as sources
+from arc.internships.sources import _looks_like_internship, fetch_all, manual_job
 
 
 @pytest.fixture(autouse=True)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from jarvis.internships.matcher import heuristic_score, rank, score_job
+from arc.internships.matcher import heuristic_score, rank, score_job
 from tests.conftest import ExplodingClient, make_router
 
 

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from jarvis.core.memory import LongTermMemory
-from jarvis.db.database import Database
-from jarvis.tools.email_engine import GmailEngine, GmailTools
+from arc.core.memory import LongTermMemory
+from arc.db.database import Database
+from arc.tools.email_engine import GmailEngine, GmailTools
 from tests.conftest import ExplodingClient, FakeMessage, FakeResponse, make_router
 
 MESSAGES = [

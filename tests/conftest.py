@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from jarvis.config import LLMConfig, load_config
-from jarvis.core.llm import LLMRouter
-from jarvis.db.database import Database
-from jarvis.profile.profile import Profile
+from arc.config import LLMConfig, load_config
+from arc.core.llm import LLMRouter
+from arc.db.database import Database
+from arc.profile.profile import Profile
 
 
 # --------------------------------------------------------------- fake LLM API
@@ -97,15 +97,23 @@ def _clean_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guard every test against env leakage from third-party imports.
 
     Optional engines (e.g. browser-use, open-interpreter) call ``load_dotenv()``
-    at import time, which reads the project's ``.env`` and injects JARVIS LLM
+    at import time, which reads the project's ``.env`` and injects ARC LLM
     vars into ``os.environ``. That would otherwise leak into config-default
     assertions, so scrub the LLM-related vars before each test.
     """
-    for name in ("JARVIS_LLM_BASE_URL", "JARVIS_LLM_API_KEY",
+    for name in ("ARC_LLM_BASE_URL", "ARC_LLM_API_KEY",
+                 "ARC_MODEL_FAST", "ARC_MODEL_REASONING",
+                 "ARC_MODEL_VISION", "ARC_DATA_DIR",
+                 "ARC_SAFETY_MODE", "ARC_GMAIL_CREDENTIALS",
+                 "ARC_GMAIL_TOKEN",
+                 # Legacy pre-rename names — still scrubbed so live .env vars
+                 # don't leak via third-party load_dotenv() calls.
+                 "JARVIS_LLM_BASE_URL", "JARVIS_LLM_API_KEY",
                  "JARVIS_MODEL_FAST", "JARVIS_MODEL_REASONING",
                  "JARVIS_MODEL_VISION", "JARVIS_DATA_DIR",
                  "JARVIS_SAFETY_MODE", "JARVIS_GMAIL_CREDENTIALS",
-                 "JARVIS_GMAIL_TOKEN"):
+                 "JARVIS_GMAIL_TOKEN", "JARVIS_SKILLS_ROOT",
+                 "ARC_SKILLS_ROOT"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -128,7 +136,7 @@ def profile(tmp_path: Path) -> Profile:
             "tools": ["Git", "Docker"],
         },
         "projects": [
-            {"name": "JARVIS", "description": "AI assistant", "tech": ["Python"],
+            {"name": "ARC", "description": "AI assistant", "tech": ["Python"],
              "url": ""},
         ],
         "preferred_roles": ["Software Engineer Intern", "Backend Intern"],
@@ -138,7 +146,9 @@ def profile(tmp_path: Path) -> Profile:
 
 @pytest.fixture()
 def config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("JARVIS_DATA_DIR", raising=False)
-    monkeypatch.delenv("JARVIS_LLM_BASE_URL", raising=False)
-    monkeypatch.delenv("JARVIS_LLM_API_KEY", raising=False)
+    for _name in ("ARC_DATA_DIR", "JARVIS_DATA_DIR",
+                  "ARC_LLM_BASE_URL", "JARVIS_LLM_BASE_URL",
+                  "ARC_LLM_API_KEY", "JARVIS_LLM_API_KEY",
+                  "ARC_SKILLS_ROOT", "JARVIS_SKILLS_ROOT"):
+        monkeypatch.delenv(_name, raising=False)
     return load_config(project_root=tmp_path)

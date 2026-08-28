@@ -1,7 +1,7 @@
 [project]
-name = "jarvis"
+name = "arc-angel"
 version = "0.1.0"
-description = "JARVIS — personal AI assistant that coordinates LLM routing, computer control, browser automation, email, and an internship search engine"
+description = "ARC — personal AI assistant that coordinates LLM routing, computer control, browser automation, email, and an internship search engine"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -18,14 +18,14 @@ browser = ["browser-use>=0.1", "playwright>=1.40"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-jarvis = "jarvis.cli:main"
+arc = "arc.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["jarvis*"]
+include = ["arc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

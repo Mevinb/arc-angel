@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from jarvis.safety.permissions import Action, PermissionGuard, RiskLevel
-from jarvis.tools.base import Tool, ToolRegistry, ToolResult
-from jarvis.tools.computer import PythonTool, ShellTool
+from arc.safety.permissions import Action, PermissionGuard, RiskLevel
+from arc.tools.base import Tool, ToolRegistry, ToolResult
+from arc.tools.computer import PythonTool, ShellTool
 
 
 class EchoTool(Tool):

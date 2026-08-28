@@ -5,15 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from jarvis.app import JarvisApp
-from jarvis.config import load_config
+from arc.app import ArcApp
+from arc.config import load_config
 from tests.conftest import FakeMessage, FakeResponse, FakeToolCall
 
 
-def _app(tmp_path: Path, responses=None, client=None) -> JarvisApp:
+def _app(tmp_path: Path, responses=None, client=None) -> ArcApp:
     config = load_config(project_root=tmp_path)
     config.safety_mode = "auto"  # no interactive approvals in tests
-    app = JarvisApp(config=config, quiet=True)
+    app = ArcApp(config=config, quiet=True)
     if responses is not None or client is not None:
         from tests.conftest import ScriptedClient
         app.router._client = client or ScriptedClient(responses or [])
@@ -62,7 +62,7 @@ class TestWiring:
 
 class TestJobFlow:
     def test_search_reports_and_saves(self, tmp_path, monkeypatch):
-        import jarvis.internships.sources as sources
+        import arc.internships.sources as sources
 
         def fake_source(**_):
             return [

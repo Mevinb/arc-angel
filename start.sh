@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# start.sh — launch OmniRoute (if not already running) and JARVIS together.
+# start.sh — launch OmniRoute (if not already running) and ARC together.
 #
-#   ./start.sh                start OmniRoute then launch JARVIS chat
-#   ./start.sh doctor         start OmniRoute then run `jarvis doctor`
+#   ./start.sh                start OmniRoute then launch ARC chat
+#   ./start.sh doctor         start OmniRoute then run `arc doctor`
 #   ./start.sh ask "..."      start OmniRoute then run a one-shot question
-#   ./start.sh --no-llm       launch JARVIS without starting OmniRoute
+#   ./start.sh --no-llm       launch ARC without starting OmniRoute
 #
 # OmniRoute runs in the background (detached) so chat stays in the foreground
-# in this terminal. It binds to http://127.0.0.1:20128/v1, which JARVIS reads
+# in this terminal. It binds to http://127.0.0.1:20128/v1, which ARC reads
 # from .env / config.yaml.
 #
 set -euo pipefail
@@ -29,7 +29,7 @@ if [[ -z "${OMNIROUTE_BIN:-}" ]]; then
         fi
     done
 fi
-JARVIS_BIN="${JARVIS_BIN:-$PROJECT_DIR/.venv/bin/jarvis}"
+ARC_BIN="${ARC_BIN:-$PROJECT_DIR/.venv/bin/arc}"
 OMNIROUTE_URL="http://127.0.0.1:20128"
 OMNIROUTE_LOG="${OMNIROUTE_LOG:-$PROJECT_DIR/data/omniroute.log}"
 OMNIROUTE_PID_FILE="${OMNIROUTE_PID_FILE:-$PROJECT_DIR/data/omniroute.pid}"
@@ -94,16 +94,16 @@ start_omniroute() {
 }
 
 # ---------------------------------------------------------------------------
-# Launch JARVIS
+# Launch ARC
 # ---------------------------------------------------------------------------
-launch_jarvis() {
-    if [ ! -x "$JARVIS_BIN" ]; then
-        echo "ERROR: JARVIS not found at $JARVIS_BIN" >&2
+launch_arc() {
+    if [ ! -x "$ARC_BIN" ]; then
+        echo "ERROR: ARC not found at $ARC_BIN" >&2
         echo "Activate the venv / install with:  pip install -e ." >&2
         return 1
     fi
-    # Pass all args except our --no-llm flag through to jarvis CLI.
-    exec "$JARVIS_BIN" "$@"
+    # Pass all args except our --no-llm flag through to arc CLI.
+    exec "$ARC_BIN" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -120,4 +120,4 @@ else
     start_omniroute
 fi
 
-launch_jarvis "${ARGS[@]}"
+launch_arc "${ARGS[@]}"

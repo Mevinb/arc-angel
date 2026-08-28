@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from jarvis.safety.permissions import (Action, PermissionDenied, PermissionGuard,
+from arc.safety.permissions import (Action, PermissionDenied, PermissionGuard,
                                        RiskLevel, classify_command, highest_risk)
 
 

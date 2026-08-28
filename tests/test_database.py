@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from jarvis.db.database import Database, utcnow
+from arc.db.database import Database, utcnow
 
 
 class TestJobs:
