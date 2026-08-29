@@ -351,11 +351,116 @@ class PlaywrightTool(Tool):
             return ToolResult.failure(f"Playwright failed: {exc}")
 
 
+class ChromeControlTool(Tool):
+    """Full cursor control of visible Chrome — ARC drives it completely."""
+
+    name = "computer.chrome_control"
+    description = ("Control Chrome visibly on your screen like a human — click, "
+                   "type, press keys, wait. Chrome pops on your Wayland session "
+                   "and ARC moves the cursor itself (no need for you to touch it). "
+                   "Use for ChatGPT, image generation, etc. Handles Cloudflare via "
+                   "visible ozone Wayland mode.")
+    risk = RiskLevel.GREEN
+    parameters = {
+        "properties": {
+            "action": {"type": "string", "enum": ["open", "click", "type", "press", "wait", "screenshot"],
+                       "description": "open=url, click=selector, type=text into selector, press=key, wait=ms"},
+            "target": {"type": "string", "description": "URL for open, CSS selector for click/type, text for type, key for press, ms for wait"},
+            "value": {"type": "string", "description": "Text to type (for type action)"},
+        },
+        "required": ["action", "target"],
+    }
+
+    def __init__(self, screenshot_dir: Optional[Path] = None) -> None:
+        self.screenshot_dir = screenshot_dir or Path("data/screenshots")
+        self._browser = None
+        self._context = None
+        self._page = None
+
+    def _ensure_browser(self, url: str = "https://chatgpt.com"):
+        if self._page is not None:
+            try:
+                # Check if still open
+                self._page.title()
+                return
+            except Exception:
+                pass
+        # Launch visible Chrome on Wayland — pops on user's screen
+        from playwright.sync_api import sync_playwright
+        import os
+        pw = sync_playwright().start()
+        args = ["--ozone-platform=wayland", "--enable-features=UseOzonePlatform"]
+        # Use user's existing profile so login persists
+        user_data = os.path.expanduser("~/.config/google-chrome")
+        # Try persistent context first (keeps login), fallback to regular
+        try:
+            self._context = pw.chromium.launch_persistent_context(
+                user_data_dir=user_data,
+                headless=False,
+                args=args,
+                viewport={"width": 1920, "height": 1080},
+            )
+            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        except Exception:
+            browser = pw.chromium.launch(headless=False, args=args)
+            self._context = browser.new_context(viewport={"width": 1920, "height": 1080})
+            self._page = self._context.new_page()
+        self._page.goto(url, wait_until="domcontentloaded", timeout=40000)
+        self._page.wait_for_timeout(7000)
+
+    def run(self, action: str = "", target: str = "", value: str = "", **_: Any) -> ToolResult:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return ToolResult.failure("playwright not installed")
+        try:
+            action = (action or "").lower().strip()
+            target = (target or "").strip()
+            if action == "open":
+                self._ensure_browser(target or "https://chatgpt.com")
+                title = self._page.title()
+                return ToolResult.success(f"Chrome popped — {title} — {self._page.url}\nARC now controls the cursor. Tell ARC what to click/type next, or let it handle the image generation.")
+            if self._page is None:
+                self._ensure_browser()
+            if action == "click":
+                self._page.click(target, timeout=10000)
+                self._page.wait_for_timeout(800)
+                return ToolResult.success(f"Clicked {target!r} — {self._page.url[:80]}")
+            if action == "type":
+                # target is selector, value is text
+                selector = target
+                text = value or target
+                if value:
+                    self._page.fill(selector, text, timeout=10000)
+                else:
+                    self._page.keyboard.type(text)
+                self._page.wait_for_timeout(500)
+                return ToolResult.success(f"Typed into {selector!r}")
+            if action == "press":
+                self._page.keyboard.press(target)
+                self._page.wait_for_timeout(500)
+                return ToolResult.success(f"Pressed {target}")
+            if action == "wait":
+                ms = int(target) if target.isdigit() else 2000
+                self._page.wait_for_timeout(min(ms, 10000))
+                return ToolResult.success(f"Waited {ms}ms")
+            if action == "screenshot":
+                self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+                path = self.screenshot_dir / "chrome_control.png"
+                self._page.screenshot(path=str(path))
+                return ToolResult.success(f"Screenshot → {path}", screenshot=str(path))
+            return ToolResult.failure(f"Unknown action {action!r} — use open/click/type/press/wait/screenshot")
+        except Exception as exc:
+            logger.exception("chrome_control failed")
+            return ToolResult.failure(f"Chrome control failed: {exc}")
+
+
 def register_browser_tools(registry: Any, router: Optional[Any] = None,
                            screenshot_dir: Optional[Path] = None) -> None:
     registry.register(WebFetchTool())
     registry.register(PlaywrightTool(screenshot_dir=screenshot_dir))
     registry.register(BrowserUseTool(router=router))
+    registry.register(ChromeControlTool(screenshot_dir=screenshot_dir))
 
 
 __all__ = ["WebFetchTool", "BrowserUseTool", "PlaywrightTool", "register_browser_tools",
