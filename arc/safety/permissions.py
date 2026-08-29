@@ -57,12 +57,15 @@ ALWAYS_ASK_TOOLS: Dict[str, RiskLevel] = {
     "email.create_draft": RiskLevel.YELLOW,
     "application.submit": RiskLevel.RED,
     "browser.task": RiskLevel.GREEN,  # browser automation: auto-run (user opted in)
+    "browser.open": RiskLevel.GREEN,
     "browser.fill_form": RiskLevel.YELLOW,
     "browser.download": RiskLevel.YELLOW,
     "computer.run": RiskLevel.YELLOW,  # may be escalated to RED by command scan
     "computer.run_shell": RiskLevel.YELLOW,
     "computer.run_python": RiskLevel.YELLOW,
     "computer.task": RiskLevel.YELLOW,
+    "computer.open_chrome": RiskLevel.GREEN,
+    "computer.chrome_control": RiskLevel.GREEN,
     "jobs.update_status": RiskLevel.YELLOW,
     "file.write": RiskLevel.YELLOW,
     "file.delete": RiskLevel.RED,

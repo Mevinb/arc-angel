@@ -208,7 +208,8 @@ class ChromeVisibleTool(Tool):
     description = ("Open a URL in Chrome visibly on the user's screen (Wayland, "
                    "uses the existing Chrome profile so the user stays logged in). "
                    "Use this when the user wants to SEE the browser pop up and "
-                   "interact with cursor. Handles chatgpt.com/login correctly.")
+                   "interact with cursor. Handles chatgpt.com/login correctly. "
+                   "Idempotent — reuses the same window if already open.")
     risk = RiskLevel.GREEN
     parameters = {
         "properties": {
@@ -218,75 +219,25 @@ class ChromeVisibleTool(Tool):
     }
 
     def run(self, url: str = "", **_: Any) -> ToolResult:
-        import os
-        import subprocess
-        import time
         if not url:
             return ToolResult.failure("No URL provided")
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
-        # Ensure Wayland/Display are set for visible Chrome
-        env = os.environ.copy()
-        env.setdefault("DISPLAY", ":1")
-        env.setdefault("WAYLAND_DISPLAY", "wayland-0")
-        env.setdefault("XDG_SESSION_TYPE", "wayland")
         try:
-            # Try new-window in existing session first (fastest, preserves login)
-            # Also ensure we have a remote-debugging Chrome for ARC to control via CDP
-            # Launch a debuggable Chrome in background if not already running
-            try:
-                import http.client
-                conn = http.client.HTTPConnection("127.0.0.1", 9222, timeout=1)
-                conn.request("GET", "/json/version")
-                if conn.getresponse().status != 200:
-                    raise Exception("no cdp")
-            except Exception:
-                # No debuggable Chrome — launch one in background with remote debugging
-                # Use a temp profile copy so we don't lock the main one
-                import tempfile
-                import shutil
-                from pathlib import Path
-                user_data = os.path.expanduser("~/.config/google-chrome")
-                tmp_profile = Path(tempfile.gettempdir()) / "arc-chrome-debug"
-                try:
-                    if not tmp_profile.exists():
-                        shutil.copytree(user_data, tmp_profile, ignore=lambda d, f: ["Singleton*"], dirs_exist_ok=True)
-                except Exception:
-                    tmp_profile = Path(user_data)
-                try:
-                    subprocess.Popen(
-                        ["google-chrome", f"--remote-debugging-port=9222", f"--user-data-dir={tmp_profile}",
-                         "--no-first-run", "--no-default-browser-check",
-                         "--ozone-platform=wayland", "--enable-features=UseOzonePlatform",
-                         "about:blank"],
-                        env=env,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    time.sleep(2)
-                except Exception:
-                    pass
+            from .chrome_manager import ChromeManager
 
-            result = subprocess.run(
-                ["google-chrome", "--new-window", url],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            # Check if it succeeded or fell back to existing session
-            if result.returncode == 0 or "Opening in existing browser session" in (result.stderr or ""):
-                return ToolResult.success(f"Chrome popped on your screen — {url}\n"
-                                          f"Use your cursor to interact. ARC can also drive it via computer.chrome_control (now connected via CDP on :9222).")
-            # Fallback: xdg-open
-            subprocess.Popen(["xdg-open", url], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return ToolResult.success(f"Opened {url} via xdg-open on your display.")
-        except FileNotFoundError:
+            page = ChromeManager.instance().ensure_visible(url)
+            # Pull title/url on the manager thread for a useful response
             try:
-                subprocess.Popen(["xdg-open", url], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return ToolResult.success(f"Opened {url} via xdg-open.")
-            except Exception as exc:
-                return ToolResult.failure(f"Failed to open Chrome: {exc}")
+                title = page.title()
+                cur = page.url
+            except Exception:
+                title, cur = "", url
+            return ToolResult.success(
+                f"Chrome ready — {title or url} — {cur}\nVisible Chrome on your screen now shows {cur}. Reuses same window; ARC drives it via computer.chrome_control.",
+                url=cur or url,
+                title=title,
+            )
         except Exception as exc:
             return ToolResult.failure(f"Failed to open Chrome: {exc}")
 

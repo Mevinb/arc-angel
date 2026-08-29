@@ -261,7 +261,8 @@ class PlaywrightTool(Tool):
     name = "browser.open"
     description = ("Open a URL in headless Chromium and extract the rendered text "
                    "and links (JavaScript executes). Use for dynamic pages that "
-                   "web.fetch cannot read.")
+                   "web.fetch cannot read. For chatgpt.com/login use visible=true "
+                   "to pop your logged-in Chrome via ChromeManager.")
     risk = RiskLevel.GREEN
     parameters = {
         "properties": {
@@ -287,59 +288,58 @@ class PlaywrightTool(Tool):
             visible: bool = False, **_: Any) -> ToolResult:
         if not url:
             return ToolResult.failure("No URL provided")
+        if not re.match(r"^https?://", url):
+            url = "https://" + url
         try:
-            from playwright.sync_api import sync_playwright  # type: ignore
+            from playwright.sync_api import sync_playwright  # noqa: F401
         except ImportError:
             return ToolResult.failure(
                 "playwright is not installed. Install with: "
                 "pip install playwright && playwright install chromium")
-        def _do_playwright() -> ToolResult:
-            import os
-            # Wayland detection: use visible mode with ozone to bypass Cloudflare
-            # and pop Chrome on the user's screen. Auto-detects GNOME on Wayland.
-            use_visible = bool(visible)
-            if not use_visible and os.environ.get("XDG_SESSION_TYPE") == "wayland":
-                # For Cloudflare-protected sites like chatgpt.com, headless is
-                # detected. Visible mode with ozone bypasses it.
-                if any(d in url for d in ("chatgpt.com", "openai.com", "auth0")):
-                    use_visible = True
-            with sync_playwright() as pw:
-                if use_visible:
-                    # Visible Chrome on user's Wayland session (pop on screen)
-                    # Reuse existing Chrome profile so user is logged in
-                    args = [
-                        "--ozone-platform=wayland",
-                        "--enable-features=UseOzonePlatform",
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                        "--disable-infobars",
-                    ]
-                    # Use DISPLAY=:1 / WAYLAND_DISPLAY=wayland-0 discovered on this machine
-                    env_display = os.environ.get("DISPLAY", ":1")
-                    env_wayland = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
-                    # Ensure env for subprocess
-                    os.environ.setdefault("DISPLAY", env_display)
-                    os.environ.setdefault("WAYLAND_DISPLAY", env_wayland)
-                    # Use local Chrome (channel="chrome") so Google doesn't flag as insecure
-                    try:
-                        browser = pw.chromium.launch(headless=False, channel="chrome", args=args)
-                    except Exception:
-                        browser = pw.chromium.launch(headless=False, args=args)
-                    context = browser.new_context(viewport={"width": 1920, "height": 1080})
-                    # Hide webdriver
-                    try:
-                        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                    except Exception:
-                        pass
-                    page = context.new_page()
-                    page.goto(url, wait_until="domcontentloaded", timeout=40_000)
-                    page.wait_for_timeout(7000)  # let Cloudflare + JS settle
-                else:
-                    browser = pw.chromium.launch(headless=True)
-                    page = browser.new_page()
-                    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                    page.wait_for_timeout(1500)  # let JS settle
+
+        # Visible ChatGPT/login: delegate to singleton ChromeManager (no duplicate windows)
+        import os as _os
+        use_visible = bool(visible)
+        if not use_visible and _os.environ.get("XDG_SESSION_TYPE") == "wayland":
+            if any(d in url for d in ("chatgpt.com", "openai.com", "auth0")):
+                use_visible = True
+
+        if use_visible and any(d in url for d in ("chatgpt.com", "openai.com")):
+            try:
+                from .chrome_manager import ChromeManager
+
+                page = ChromeManager.instance().ensure_visible(url)
+                # Extract text/links on the manager's dedicated Playwright thread
+                def _extract(p):
+                    title = p.title()
+                    text = p.inner_text("body")[:max(int(max_chars), 500)]
+                    links = p.eval_on_selector_all(
+                        "a[href]",
+                        "els => els.slice(0, 40).map(e => ({href: e.href, text: e.innerText.slice(0,120)}))",
+                    )
+                    shot_path = ""
+                    if screenshot:
+                        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+                        target = self.screenshot_dir / (re.sub(r"\W+", "_", url)[:80] + ".png")
+                        p.screenshot(path=str(target), full_page=False)
+                        shot_path = str(target)
+                    return title, text, links, shot_path
+
+                mgr = ChromeManager.instance()
+                title, text, links, shot_path = mgr.do(_extract)  # type: ignore[arg-type]
+                output = f"# {title}\n{text}\n\n[visible Chrome — {url} — same window reused, logged-in]"
+                return ToolResult.success(output, url=url, title=title, links=links, screenshot=shot_path)
+            except Exception as exc:
+                logger.debug("ChromeManager visible failed, falling back to headless: %s", exc)
+
+        # Headless path — runs on a dedicated thread to avoid greenlet/asyncio clash
+        def _do_headless() -> ToolResult:
+            from playwright.sync_api import sync_playwright as _sp
+            with _sp() as pw:
+                browser = pw.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(1500)
                 title = page.title()
                 text = page.inner_text("body")[:max(int(max_chars), 500)]
                 links = page.eval_on_selector_all(
@@ -352,28 +352,14 @@ class PlaywrightTool(Tool):
                     target = self.screenshot_dir / (re.sub(r"\W+", "_", url)[:80] + ".png")
                     page.screenshot(path=str(target), full_page=False)
                     shot_path = str(target)
-                if use_visible:
-                    # Keep visible Chrome open for user to see/interact
-                    # Don't close browser — let it stay popped on screen
-                    # Just close the Playwright wrapper but leave Chrome window
-                    try:
-                        # Detach: keep browser running in background
-                        browser.close()
-                    except Exception:
-                        pass
-                    output = f"# {title}\n{text}\n\n[visible Chrome popped on your screen — {url}]"
-                else:
-                    browser.close()
-                    output = f"# {title}\n{text}"
-                return ToolResult.success(output, url=url, title=title,
-                                          links=links, screenshot=shot_path)
+                browser.close()
+                return ToolResult.success(f"# {title}\n{text}", url=url, title=title, links=links, screenshot=shot_path)
 
-        # Run in a dedicated thread to avoid "Sync API inside the asyncio loop"
         import concurrent.futures
 
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_do_playwright)
+                future = executor.submit(_do_headless)
                 return future.result(timeout=60)
         except Exception as exc:  # noqa: BLE001
             logger.exception("playwright task failed")
@@ -381,20 +367,28 @@ class PlaywrightTool(Tool):
 
 
 class ChromeControlTool(Tool):
-    """Full cursor control of visible Chrome — ARC drives it completely."""
+    """Full cursor control of visible Chrome — ARC drives it completely.
+
+    Uses ChromeManager singleton so all actions share one Playwright thread
+    and one visible window (no per-call `google-chrome --new-window` spam).
+    Supports both browser-DOM actions (click/type/press via Playwright) and
+    Wayland-native OS actions (move/type_system/scroll via wtype/ydotool)
+    so the system can use both typing and cursor movement.
+    """
 
     name = "computer.chrome_control"
     description = ("Control Chrome visibly on your screen like a human — click, "
-                   "type, press keys, wait. Chrome pops on your Wayland session "
-                   "and ARC moves the cursor itself (no need for you to touch it). "
-                   "Use for ChatGPT, image generation, etc. Handles Cloudflare via "
-                   "visible ozone Wayland mode.")
+                   "type, press keys, move cursor, wait. Chrome pops on your "
+                   "Wayland session and ARC moves the cursor itself (no need for "
+                   "you to touch it). Uses ChromeManager singleton (one window). "
+                   "Also supports OS-level typing/movement via wtype/ydotool on Wayland.")
     risk = RiskLevel.GREEN
     parameters = {
         "properties": {
-            "action": {"type": "string", "enum": ["open", "click", "type", "press", "wait", "screenshot"],
-                       "description": "open=url, click=selector, type=text into selector, press=key, wait=ms"},
-            "target": {"type": "string", "description": "URL for open, CSS selector for click/type, text for type, key for press, ms for wait"},
+            "action": {"type": "string", "enum": ["open", "click", "type", "press", "wait", "screenshot",
+                                                  "move", "type_system", "scroll"],
+                       "description": "open=url, click=selector, type=text into selector, press=key, wait=ms, move='x,y', type_system=text to type at OS level, scroll=direction"},
+            "target": {"type": "string", "description": "URL for open, CSS selector for click/type, text for type, key for press, ms for wait, 'x,y' for move, text for type_system, direction for scroll"},
             "value": {"type": "string", "description": "Text to type (for type action)"},
         },
         "required": ["action", "target"],
@@ -402,170 +396,132 @@ class ChromeControlTool(Tool):
 
     def __init__(self, screenshot_dir: Optional[Path] = None) -> None:
         self.screenshot_dir = screenshot_dir or Path("data/screenshots")
-        self._browser = None
-        self._context = None
-        self._page = None
-
-    def _ensure_browser(self, url: str = "https://chatgpt.com"):
-        if self._page is not None:
-            try:
-                # Check if still open
-                self._page.title()
-                return
-            except Exception:
-                pass
-        # Simple and reliable: pop Chrome visibly on user's Wayland session
-        # using the real google-chrome binary with the existing profile.
-        # This is what "use the cursor and my chrome app directly so it will
-        # pop on my screen" means — we use the actual Chrome you see, not a
-        # headless Chromium. No Playwright needed for open; it just pops.
-        import os
-        import subprocess
-
-        try:
-            env = os.environ.copy()
-            env.setdefault("DISPLAY", ":1")
-            env.setdefault("WAYLAND_DISPLAY", "wayland-0")
-            env.setdefault("XDG_SESSION_TYPE", "wayland")
-            subprocess.Popen(
-                ["google-chrome", "--new-window", url],
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            import time
-
-            time.sleep(1.5)
-            # We don't need a Playwright page for open — the window is already popped.
-            # Keep _page as None so subsequent actions know to use fallback.
-            self._page = None
-            return
-        except Exception as exc:
-            logger.debug("google-chrome launch failed: %s", exc)
-            # Fallback: try Playwright visible as last resort
-            try:
-                from playwright.sync_api import sync_playwright
-                import concurrent.futures
-
-                def _launch_fallback():
-                    pw = sync_playwright().start()
-                    args = ["--ozone-platform=wayland", "--enable-features=UseOzonePlatform"]
-                    browser = pw.chromium.launch(headless=False, args=args)
-                    ctx = browser.new_context(viewport={"width": 1920, "height": 1080})
-                    page = ctx.new_page()
-                    page.goto(url, wait_until="domcontentloaded", timeout=40000)
-                    page.wait_for_timeout(4000)
-                    return pw, browser, ctx, page
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    pw, browser, ctx, page = ex.submit(_launch_fallback).result(timeout=30)
-                    self._context = ctx
-                    self._page = page
-                    self._browser = browser
-            except Exception as e:
-                raise RuntimeError(f"Chrome launch failed: {e}") from e
 
     def run(self, action: str = "", target: str = "", value: str = "", **_: Any) -> ToolResult:
-        # For open, use the simple subprocess path that we know pops on screen
+        from .chrome_manager import ChromeManager
+
         action_l = (action or "").lower().strip()
         tgt = (target or "").strip()
-        if action_l == "open":
-            # Use the same logic as computer.open_chrome but via self._ensure_browser
-            # which now just pops Chrome via subprocess and handles Wayland
+        mgr = ChromeManager.instance()
+
+        # ----- OS-level Wayland actions (no page needed) -----
+        if action_l == "type_system":
             try:
-                self._ensure_browser(tgt or "https://chatgpt.com")
-                # After popping, try to get title via a lightweight headless check
-                # but don't fail if we can't — the window is already popped
-                if self._page is not None:
-                    try:
-                        title = self._page.title()
-                        return ToolResult.success(f"Chrome popped — {title} — {self._page.url}\nARC now controls the cursor. Tell ARC what to click/type next, or let it handle the image generation.")
-                    except Exception:
-                        pass
-                return ToolResult.success(f"Chrome popped on your screen — {tgt or 'https://chatgpt.com'}\nARC can now drive it. Use click/type/press actions or let ARC handle the image generation.")
+                from .wayland_input import type_text as _type_text
+
+                text = value or tgt
+                ok, msg = _type_text(text)
+                if ok:
+                    return ToolResult.success(msg)
+                # Fallback: try Playwright keyboard.type via manager page
+                try:
+                    mgr.do(lambda p: p.keyboard.type(text))
+                    return ToolResult.success(f"Typed {len(text)} chars via browser fallback")
+                except Exception:
+                    return ToolResult.failure(msg)
+            except Exception as exc:
+                return ToolResult.failure(f"type_system failed: {exc}")
+
+        if action_l == "move":
+            try:
+                from .wayland_input import move_click as _move_click
+
+                # target "x,y" or "x,y:button"
+                parts = tgt.replace(":", ",").split(",")
+                if len(parts) < 2:
+                    return ToolResult.failure("move requires 'x,y' e.g. '500,300'")
+                x, y = int(parts[0].strip()), int(parts[1].strip())
+                button = parts[2].strip() if len(parts) > 2 else "left"
+                ok, msg = _move_click(x, y, button)
+                if ok:
+                    return ToolResult.success(msg)
+                return ToolResult.failure(msg)
+            except Exception as exc:
+                return ToolResult.failure(f"move failed: {exc}")
+
+        if action_l == "scroll":
+            try:
+                from .wayland_input import scroll as _scroll
+
+                direction = tgt.lower() if tgt.lower() in ("up", "down", "left", "right") else "down"
+                amount = int(value) if value and value.isdigit() else 3
+                ok, msg = _scroll(direction, amount)
+                if ok:
+                    return ToolResult.success(msg)
+                # Fallback: wheel via Playwright
+                try:
+                    mgr.do(lambda p: p.mouse.wheel(0, 300 if direction == "down" else -300))
+                    return ToolResult.success(f"Scrolled {direction} via browser")
+                except Exception:
+                    return ToolResult.failure(msg)
+            except Exception as exc:
+                return ToolResult.failure(f"scroll failed: {exc}")
+
+        # ----- Browser actions via ChromeManager (shared thread, no greenlet error) -----
+        if action_l == "open":
+            try:
+                page = mgr.ensure_visible(tgt or "https://chatgpt.com")
+                title = mgr.do(lambda p: p.title())
+                cur = mgr.do(lambda p: p.url)
+                return ToolResult.success(f"Chrome ready — {title} — {cur}\nSame window reused; ARC now controls cursor/typing. Use click/type/press/move/type_system as needed.",
+                                          url=cur, title=title)
             except Exception as exc:
                 logger.exception("chrome_control open failed")
                 return ToolResult.failure(f"Chrome open failed: {exc}")
 
-        # For other actions, ensure we have a page (try CDP first)
-        if self._page is None:
-            try:
-                self._ensure_browser()
-            except Exception:
-                pass
-            if self._page is None:
-                # No page yet — try to connect to debuggable Chrome on :9222
-                try:
-                    from playwright.sync_api import sync_playwright
-                    import concurrent.futures
+        # For non-open, ensure a page exists (lazy)
+        try:
+            # This also handles idempotent reuse
+            mgr.ensure_visible()
+        except Exception as exc:
+            return ToolResult.failure(f"Chrome not ready: {exc}. Try 'open' first.")
 
-                    def _connect():
-                        from playwright.sync_api import sync_playwright
-                        import http.client
-                        pw = sync_playwright().start()
-                        # Try CDP
-                        try:
-                            conn = http.client.HTTPConnection("127.0.0.1", 9222, timeout=1)
-                            conn.request("GET", "/json/version")
-                            if conn.getresponse().status == 200:
-                                browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
-                                ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-                                page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                                self._context = ctx
-                                self._page = page
-                                return
-                        except Exception:
-                            pass
-                        # Fallback: headless check
-                        browser = pw.chromium.launch(headless=True)
-                        ctx = browser.new_context()
-                        page = ctx.new_page()
-                        self._context = ctx
-                        self._page = page
-
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                        ex.submit(_connect).result(timeout=15)
-                except Exception as exc:
-                    return ToolResult.failure(f"Chrome not ready for control: {exc}. Try 'open' first.")
-
-        # Now page should be available — do the action in a thread to avoid asyncio loop issues
-        def _do_action() -> ToolResult:
-            if self._page is None:
-                return ToolResult.failure("No browser page available")
+        def _do_action(page) -> ToolResult:  # runs on manager thread
             if action_l == "click":
-                self._page.click(tgt, timeout=10000)
-                self._page.wait_for_timeout(800)
-                return ToolResult.success(f"Clicked {tgt!r} — {self._page.url[:80]}")
+                # Support "selector" or "x,y"
+                if "," in tgt and tgt.replace(",", "").replace(" ", "").isdigit():
+                    x_str, y_str = [s.strip() for s in tgt.split(",")][:2]
+                    page.mouse.click(int(x_str), int(y_str))
+                    page.wait_for_timeout(800)
+                    return ToolResult.success(f"Clicked at {tgt!r} — {page.url[:80]}")
+                page.click(tgt, timeout=10000)
+                page.wait_for_timeout(800)
+                return ToolResult.success(f"Clicked {tgt!r} — {page.url[:80]}")
             if action_l == "type":
                 selector = tgt
                 text = value or tgt
-                if value and selector:
-                    self._page.fill(selector, text, timeout=10000)
+                if value and selector and not selector.isdigit():
+                    # If selector looks like a CSS selector, fill it; else keyboard type
+                    try:
+                        page.fill(selector, text, timeout=8000)
+                    except Exception:
+                        # Fallback: focus then type
+                        try:
+                            page.focus(selector, timeout=5000)
+                        except Exception:
+                            pass
+                        page.keyboard.type(text)
                 else:
-                    self._page.keyboard.type(text)
-                self._page.wait_for_timeout(500)
-                return ToolResult.success(f"Typed into {selector!r}")
+                    page.keyboard.type(text)
+                page.wait_for_timeout(500)
+                return ToolResult.success(f"Typed {len(text)} chars into {selector!r}")
             if action_l == "press":
-                self._page.keyboard.press(tgt)
-                self._page.wait_for_timeout(500)
+                page.keyboard.press(tgt)
+                page.wait_for_timeout(500)
                 return ToolResult.success(f"Pressed {tgt}")
             if action_l == "wait":
                 ms = int(tgt) if tgt.isdigit() else 2000
-                self._page.wait_for_timeout(min(ms, 10000))
+                page.wait_for_timeout(min(ms, 10000))
                 return ToolResult.success(f"Waited {ms}ms")
             if action_l == "screenshot":
                 self.screenshot_dir.mkdir(parents=True, exist_ok=True)
                 path = self.screenshot_dir / "chrome_control.png"
-                self._page.screenshot(path=str(path))
+                page.screenshot(path=str(path))
                 return ToolResult.success(f"Screenshot → {path}", screenshot=str(path))
-            return ToolResult.failure(f"Unknown action {action_l!r} — use open/click/type/press/wait/screenshot")
-
-        import concurrent.futures
+            return ToolResult.failure(f"Unknown action {action_l!r} — use open/click/type/press/wait/screenshot/move/type_system/scroll")
 
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_do_action)
-                return future.result(timeout=60)
+            return mgr.do(_do_action)
         except Exception as exc:
             logger.exception("chrome_control failed")
             return ToolResult.failure(f"Chrome control failed: {exc}")

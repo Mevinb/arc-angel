@@ -223,6 +223,7 @@ class VoiceSession:
         self._approver: Optional[VoiceApprover] = None
         self._last_tts_text: str = ""
         self._last_tts_time: float = 0.0
+        self._last_open_time: float = 0.0  # debounce for browser open spam
 
         # Install voice approver if allowed
         if allow_voice_approval:
@@ -364,6 +365,15 @@ class VoiceSession:
             self.tts.speak("Goodbye. Stopping voice session.")
             self._stop.set()
             return None
+        # Debounce rapid duplicate browser open requests (voice hallucination: "open Chrome" repeated)
+        low = text.lower()
+        if any(k in low for k in ("open chrome", "open browser", "chatgpt")):
+            now = time.time()
+            if now - self._last_open_time < 5.0:
+                logger.debug("Debouncing duplicate open request %r (%.1fs since last)", text, now - self._last_open_time)
+                self.console.print("[dim]Debounced duplicate Chrome open — using existing window.[/dim]")
+                return None
+            self._last_open_time = now
 
         self.console.print(f"[bold cyan]you ›[/bold cyan] {text}")
         # Show thinking state
