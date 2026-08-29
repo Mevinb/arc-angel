@@ -32,7 +32,7 @@ class VADDetector:
     All audio is expected as 16kHz mono int16 or float32.
     """
 
-    def __init__(self, aggressiveness: int = 2, sample_rate: int = 16000) -> None:
+    def __init__(self, aggressiveness: int = 3, sample_rate: int = 16000) -> None:
         self.aggressiveness = max(0, min(3, aggressiveness))
         self.sample_rate = sample_rate
         self._vad = None

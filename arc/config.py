@@ -66,7 +66,7 @@ DEFAULTS: Dict[str, Any] = {
         "always_listening": True,
         "full_duplex": True,
         "allow_voice_approval": True,
-        "vad_aggressiveness": 2,
+        "vad_aggressiveness": 3,
         "confidence_threshold": 0.6,
     },
 }

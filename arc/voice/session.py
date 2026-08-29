@@ -42,6 +42,50 @@ def is_exit_phrase(text: str) -> bool:
     return bool(EXIT_PHRASES.search(text or ""))
 
 
+def is_echo(transcript: str, last_tts: str, max_age: float = 3.0, last_time: float = 0.0) -> bool:
+    """Check if transcript is echo of recent TTS (to avoid self-trigger).
+
+    Always-listening picks up the speaker's own TTS. We compare normalized
+    lower-case and use SequenceMatcher for fuzzy match. If transcript is
+    very similar to last TTS and within 3s, treat as echo.
+    """
+    if not transcript or not last_tts:
+        return False
+    if last_time and (time.time() - last_time) > max_age:
+        return False
+    try:
+        import difflib
+
+        # Normalize both
+        a = re.sub(r"[^\w\s]", "", transcript.lower().strip())
+        b = re.sub(r"[^\w\s]", "", last_tts.lower().strip())
+        if not a or not b:
+            return False
+        # Fuzzy ratio first — very similar strings are echo
+        ratio = difflib.SequenceMatcher(None, a, b).ratio()
+        if ratio > 0.75:
+            return True
+        # Word overlap — be sensitive for short transcripts but not substring
+        a_words = set(a.split())
+        b_words = set(b.split())
+        if a_words and b_words:
+            overlap_transcript = len(a_words & b_words) / len(a_words)
+            if overlap_transcript >= 0.6:
+                return True
+            # Single word overlap only for very short TTS echo (exact word match)
+            # Don't treat "interrupt" vs "interrupted" as echo (different word)
+            if len(a_words) <= 2 and len(a_words & b_words) >= 1:
+                # Require exact word match, not substring; already handled via set
+                # But ensure the shared word is not a substring false positive
+                shared = a_words & b_words
+                # Only count if shared words are substantial (len>3)
+                if any(len(w) > 3 for w in shared):
+                    return True
+        return ratio > 0.65
+    except Exception:
+        return False
+
+
 def parse_approval(text: str) -> Optional[bool]:
     """Natural language → True/False/None (None = unclear)."""
     if not text:
@@ -177,6 +221,8 @@ class VoiceSession:
         self._stop = threading.Event()
         self._listener_thread: Optional[threading.Thread] = None
         self._approver: Optional[VoiceApprover] = None
+        self._last_tts_text: str = ""
+        self._last_tts_time: float = 0.0
 
         # Install voice approver if allowed
         if allow_voice_approval:
@@ -197,6 +243,9 @@ class VoiceSession:
         """Background thread: always listening, pushes transcripts to queue."""
         logger.info("Voice listener started (always listening, full duplex)")
         while not self._stop.is_set():
+            # Full duplex but with echo suppression: if TTS is speaking, we still
+            # listen for barge-in, but we suppress obvious echo of our own voice.
+            # Keep a short mute window after TTS starts to avoid immediate echo.
             try:
                 tx = self.stt.listen_once(timeout=1.2, silence_after=0.8)
                 text = (tx.text or "").strip()
@@ -205,6 +254,22 @@ class VoiceSession:
                 # Filter very low confidence
                 if float(getattr(tx, "confidence", 0.0) or 0.0) < 0.25:
                     logger.debug("Dropping low-confidence transcript %r", text)
+                    continue
+                # If TTS is speaking, be extra strict: only allow barge-in if
+                # transcript is clearly user speech, not echo. Check echo first.
+                if self.tts.is_speaking:
+                    # If transcript is within 2s of last TTS, treat as potential echo
+                    if is_echo(text, self._last_tts_text, max_age=4.0, last_time=self._last_tts_time):
+                        logger.debug("Dropping echo while speaking %r", text)
+                        continue
+                    # Also, if transcript is very short (1-2 words) and TTS is speaking,
+                    # it's likely echo or noise, not intentional barge-in
+                    if len(text.split()) <= 2 and (time.time() - self._last_tts_time) < 2.0:
+                        logger.debug("Dropping short transcript while speaking %r", text)
+                        continue
+                # General echo suppression even when not speaking (within 3s)
+                if is_echo(text, self._last_tts_text, last_time=self._last_tts_time):
+                    logger.debug("Dropping echo transcript %r (last TTS %r)", text, self._last_tts_text[:40])
                     continue
                 logger.info("Heard: %r (conf=%.2f)", text, tx.confidence)
                 self._queue.put(tx)
@@ -219,6 +284,9 @@ class VoiceSession:
         Returns True if barge-in happened (new transcript in queue), False otherwise.
         Uses a thread for TTS so we can poll the queue while speaking.
         """
+        # Remember for echo suppression
+        self._last_tts_text = text
+        self._last_tts_time = time.time()
         # Split into sentences for more natural barge-in granularity
         sentences = re.split(r"(?<=[.!?])\s+", text.strip())
         sentences = [s.strip() for s in sentences if s.strip()]
@@ -229,9 +297,24 @@ class VoiceSession:
                 return True
             # Check for pending barge-in before starting sentence
             if not self._queue.empty():
-                logger.info("Barge-in detected before sentence %r", sent[:40])
-                self.tts.stop()
-                return True
+                # Peek without consuming - check if it's echo first
+                try:
+                    peek = self._queue.queue[0].text if hasattr(self._queue, "queue") else ""
+                    if is_echo(peek, self._last_tts_text, last_time=self._last_tts_time):
+                        # Drop echo and continue speaking
+                        try:
+                            self._queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                        logger.debug("Ignoring echo barge-in %r", peek[:40])
+                    else:
+                        logger.info("Barge-in detected before sentence %r", sent[:40])
+                        self.tts.stop()
+                        return True
+                except Exception:
+                    logger.info("Barge-in detected before sentence %r", sent[:40])
+                    self.tts.stop()
+                    return True
             # Speak in a thread so we can poll for barge-in while speaking
             done = threading.Event()
 
@@ -246,6 +329,17 @@ class VoiceSession:
             # Poll queue while TTS is speaking
             while not done.is_set():
                 if not self._queue.empty():
+                    try:
+                        peek = self._queue.queue[0].text if hasattr(self._queue, "queue") else ""
+                        if is_echo(peek, self._last_tts_text, last_time=self._last_tts_time):
+                            try:
+                                self._queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                            logger.debug("Ignoring echo while speaking %r", peek[:40])
+                            continue
+                    except Exception:
+                        pass
                     logger.info("Barge-in while speaking %r", sent[:40])
                     self.tts.stop()
                     # Wait a bit for stop to take effect
@@ -261,6 +355,10 @@ class VoiceSession:
     def _handle_text(self, text: str) -> Optional[str]:
         """Send text to ARC and speak the reply (with barge-in)."""
         if not text or not text.strip():
+            return None
+        # Echo suppression: if this transcript is actually our own TTS, ignore
+        if is_echo(text, self._last_tts_text, last_time=self._last_tts_time):
+            logger.debug("Ignoring echo in handle_text %r", text[:60])
             return None
         if is_exit_phrase(text):
             self.tts.speak("Goodbye. Stopping voice session.")
@@ -310,9 +408,12 @@ class VoiceSession:
         except Exception:
             pass
         self.console.print("  [bold]ARC voice[/bold] — always listening, full duplex. Say [cyan]exit[/cyan] or [cyan]goodbye[/cyan] to stop.\n")
-        # Announce via TTS as well
+        # Announce via TTS as well — set echo suppression before speaking
+        tts_text = "Arc voice is ready. I'm listening. Just talk, and I'll interrupt if you need me."
+        self._last_tts_text = tts_text
+        self._last_tts_time = time.time()
         try:
-            self.tts.speak("Arc voice is ready. I'm listening. Just talk, and I'll interrupt if you need me.")
+            self.tts.speak(tts_text)
         except Exception:
             pass
 
