@@ -301,12 +301,13 @@ class VoiceSession:
         self.console = console or Console()
         self.allow_voice_approval = allow_voice_approval
         self.confidence_threshold = confidence_threshold
-        # Wake word — when enabled, only respond after hearing "hey arc"
+        # Wake word — when enabled, only respond after hearing "hey" (or "hey arc")
         voice_cfg = getattr(app.config, "voice", {}) or {}
-        self.wake_word = (wake_word or voice_cfg.get("wake_word", "hey arc") or "hey arc").lower().strip()
+        self.wake_word = (wake_word or voice_cfg.get("wake_word", "hey") or "hey").lower().strip()
         self.wake_word_enabled = bool(wake_word_enabled and voice_cfg.get("wake_word_enabled", True))
         self._wake_active_until: float = 0.0
-        self._wake_timeout: float = 10.0  # seconds to stay awake after wake word
+        self._wake_timeout: float = 12.0  # seconds to stay awake after wake word
+        self._typed_thread: Optional[threading.Thread] = None
         self._queue: queue.Queue[Transcription] = queue.Queue()
         self._stop = threading.Event()
         self._listener_thread: Optional[threading.Thread] = None
@@ -341,19 +342,25 @@ class VoiceSession:
     def _contains_wake_word(self, text: str) -> bool:
         if not self.wake_word_enabled or not self.wake_word:
             return True  # no wake word required
-        t = (text or "").lower()
-        # Handle variations: "hey arc", "hey ark", "hi arc", "hey art"
-        return self.wake_word in t or "hey arc" in t or "hey ark" in t or "hi arc" in t
+        t = (text or "").lower().strip()
+        # Wake on just "hey" or "hey arc" variants — very permissive
+        if t == "hey" or t.startswith("hey ") or " hey " in f" {t} ":
+            return True
+        return self.wake_word in t or "hey arc" in t or "hey ark" in t or "hi arc" in t or t.startswith("hey")
 
     def _extract_after_wake(self, text: str) -> str:
         if not self.wake_word_enabled:
             return text
         t_low = text.lower()
-        for phrase in (self.wake_word, "hey arc", "hey ark", "hi arc"):
+        # Try full phrases first, then just "hey"
+        for phrase in (self.wake_word, "hey arc", "hey ark", "hi arc", "hey"):
             idx = t_low.find(phrase)
             if idx != -1:
                 after = text[idx + len(phrase):].strip(" ,.!?")
-                return after if after else text  # if just wake word, return original to keep awake
+                # If just "hey" with no command, keep awake and return empty to prompt
+                if not after:
+                    return ""
+                return after
         return text
 
     # ------------------------------------------------------------------ internals
@@ -427,6 +434,45 @@ class VoiceSession:
             except Exception as exc:
                 logger.debug("listener error: %s", exc)
                 time.sleep(0.2)
+
+    def _typed_listener(self) -> None:
+        """Background thread: also accept typed input via stdin so you can type even in voice mode."""
+        logger.info("Typed listener started — you can type commands while voice is listening")
+        import sys
+
+        while not self._stop.is_set():
+            try:
+                # Use input() with prompt — Rich Console handles it, but we use plain input for simplicity
+                # We do blocking read with timeout via select to allow stop check
+                import select
+
+                # Check if stdin has data (non-blocking) — if not, sleep and continue
+                # Use sys.stdin directly for portability
+                if sys.stdin in select.select([sys.stdin], [], [], 0.5)[0]:
+                    line = sys.stdin.readline()
+                    if not line:
+                        # EOF
+                        time.sleep(0.1)
+                        continue
+                    text = line.strip()
+                    if not text:
+                        continue
+                    if is_exit_phrase(text):
+                        self._queue.put(Transcription(text=text, confidence=1.0))
+                        continue
+                    # Typed input bypasses wake word — you already typed, so handle directly
+                    # But still support "hey" prefix — strip it if present
+                    if text.lower().startswith("hey "):
+                        text = text[3:].strip()
+                        if text.lower().startswith("arc "):
+                            text = text[3:].strip()
+                    logger.info("Typed: %r", text)
+                    self._queue.put(Transcription(text=text, confidence=1.0))
+                else:
+                    time.sleep(0.1)
+            except Exception as exc:
+                logger.debug("typed listener error: %s", exc)
+                time.sleep(0.5)
 
     def _speak_with_bargein(self, text: str) -> bool:
         """Speak text sentence-by-sentence, checking for barge-in between sentences.
@@ -576,12 +622,16 @@ class VoiceSession:
         except Exception:
             pass
 
-        # Start listener thread
+        # Start listener thread (voice) + typed thread (keyboard) — you can both talk and type
         self._stop.clear()
         self._listener_thread = threading.Thread(target=self._listener, daemon=True, name="arc-voice-listener")
         self._listener_thread.start()
+        self._typed_thread = threading.Thread(target=self._typed_listener, daemon=True, name="arc-typed-listener")
+        self._typed_thread.start()
 
         self.console.print("[dim]Listening… (full duplex — you can interrupt me anytime)[/dim]")
+        self.console.print("[dim]Voice: say [cyan]hey[/cyan] to wake — e.g. 'hey generate a girl in beach'[/dim]")
+        self.console.print("[dim]Type: just type your message and press Enter — you don't need to say hey[/dim]")
 
         try:
             while not self._stop.is_set():
@@ -603,6 +653,11 @@ class VoiceSession:
                 pass
             if self._listener_thread:
                 self._listener_thread.join(timeout=1.0)
+            if getattr(self, "_typed_thread", None):
+                try:
+                    self._typed_thread.join(timeout=0.5)
+                except Exception:
+                    pass
             self.console.print("[dim]Voice session ended.[/dim]")
             try:
                 self.tts.speak("Voice session ended.")
