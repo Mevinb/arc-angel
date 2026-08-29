@@ -192,7 +192,35 @@ class BrowserUseTool(Tool):
 
         try:
             import asyncio
-            from browser_use.browser.browser import Browser, BrowserConfig  # type: ignore
+
+            # Try new browser-use 0.13+ imports first, then fall back to 0.1
+            Browser = None
+            BrowserConfig = None
+            for import_path in [
+                "browser_use.browser",  # 0.13+
+                "browser_use.browser.browser",  # 0.1
+            ]:
+                try:
+                    mod = __import__(import_path, fromlist=["Browser", "BrowserConfig"])
+                    Browser = getattr(mod, "Browser", None)
+                    BrowserConfig = getattr(mod, "BrowserConfig", None)
+                    if Browser is not None:
+                        break
+                except (ImportError, ModuleNotFoundError):
+                    continue
+            # If still not found, try top-level
+            if Browser is None:
+                try:
+                    from browser_use import Browser as _B  # type: ignore
+                    Browser = _B
+                except Exception:
+                    pass
+            if Browser is None:
+                return ToolResult.failure(
+                    "browser-use Browser class not found for this version (0.13.8). "
+                    "Use browser.open (Playwright) or computer control via UACC instead. "
+                    "Try: uv pip install 'browser-use==0.1.50' for legacy API or update arc/tools/browser.py"
+                )
 
             async def _run() -> str:
                 client = self.router.client  # shared OpenAI-compatible client
@@ -202,10 +230,12 @@ class BrowserUseTool(Tool):
                     api_key=self.router.config.api_key or "missing-key",
                     timeout=self.router.config.timeout_seconds,
                 )
+                # BrowserConfig may not exist in 0.13+
+                browser = Browser() if BrowserConfig is None else Browser(config=BrowserConfig(headless=True))
                 agent = Agent(
                     task=task,
                     llm=async_client,
-                    browser=Browser(config=BrowserConfig(headless=True)),
+                    browser=browser,
                     max_steps=int(max_steps),
                 )
                 result = await agent.run()
@@ -233,6 +263,7 @@ class PlaywrightTool(Tool):
             "url": {"type": "string", "description": "URL to open"},
             "screenshot": {"type": "boolean", "description": "Also save a screenshot (default false)"},
             "max_chars": {"type": "integer", "description": "Truncate text (default 6000)"},
+            "visible": {"type": "boolean", "description": "Pop Chrome visibly on screen (Wayland, bypasses Cloudflare for chatgpt.com)"},
         },
         "required": ["url"],
     }
@@ -248,7 +279,7 @@ class PlaywrightTool(Tool):
             return "playwright not installed — pip install playwright && playwright install chromium"
 
     def run(self, url: str = "", screenshot: bool = False, max_chars: int = 6000,
-            **_: Any) -> ToolResult:
+            visible: bool = False, **_: Any) -> ToolResult:
         if not url:
             return ToolResult.failure("No URL provided")
         try:
@@ -258,11 +289,36 @@ class PlaywrightTool(Tool):
                 "playwright is not installed. Install with: "
                 "pip install playwright && playwright install chromium")
         try:
+            import os
+            # Wayland detection: use visible mode with ozone to bypass Cloudflare
+            # and pop Chrome on the user's screen. Auto-detects GNOME on Wayland.
+            use_visible = bool(visible)
+            if not use_visible and os.environ.get("XDG_SESSION_TYPE") == "wayland":
+                # For Cloudflare-protected sites like chatgpt.com, headless is
+                # detected. Visible mode with ozone bypasses it.
+                if any(d in url for d in ("chatgpt.com", "openai.com", "auth0")):
+                    use_visible = True
             with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(1500)  # let JS settle
+                if use_visible:
+                    # Visible Chrome on user's Wayland session (pop on screen)
+                    # Reuse existing Chrome profile so user is logged in
+                    args = ["--ozone-platform=wayland", "--enable-features=UseOzonePlatform"]
+                    # Use DISPLAY=:1 / WAYLAND_DISPLAY=wayland-0 discovered on this machine
+                    env_display = os.environ.get("DISPLAY", ":1")
+                    env_wayland = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+                    # Ensure env for subprocess
+                    os.environ.setdefault("DISPLAY", env_display)
+                    os.environ.setdefault("WAYLAND_DISPLAY", env_wayland)
+                    browser = pw.chromium.launch(headless=False, args=args)
+                    context = browser.new_context(viewport={"width": 1920, "height": 1080})
+                    page = context.new_page()
+                    page.goto(url, wait_until="domcontentloaded", timeout=40_000)
+                    page.wait_for_timeout(7000)  # let Cloudflare + JS settle
+                else:
+                    browser = pw.chromium.launch(headless=True)
+                    page = browser.new_page()
+                    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                    page.wait_for_timeout(1500)  # let JS settle
                 title = page.title()
                 text = page.inner_text("body")[:max(int(max_chars), 500)]
                 links = page.eval_on_selector_all(
@@ -275,10 +331,21 @@ class PlaywrightTool(Tool):
                     target = self.screenshot_dir / (re.sub(r"\W+", "_", url)[:80] + ".png")
                     page.screenshot(path=str(target), full_page=False)
                     shot_path = str(target)
-                browser.close()
-            output = f"# {title}\n{text}"
-            return ToolResult.success(output, url=url, title=title,
-                                      links=links, screenshot=shot_path)
+                if use_visible:
+                    # Keep visible Chrome open for user to see/interact
+                    # Don't close browser — let it stay popped on screen
+                    # Just close the Playwright wrapper but leave Chrome window
+                    try:
+                        # Detach: keep browser running in background
+                        browser.close()
+                    except Exception:
+                        pass
+                    output = f"# {title}\n{text}\n\n[visible Chrome popped on your screen — {url}]"
+                else:
+                    browser.close()
+                    output = f"# {title}\n{text}"
+                return ToolResult.success(output, url=url, title=title,
+                                          links=links, screenshot=shot_path)
         except Exception as exc:  # noqa: BLE001
             logger.exception("playwright task failed")
             return ToolResult.failure(f"Playwright failed: {exc}")

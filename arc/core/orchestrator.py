@@ -25,7 +25,7 @@ from ..tools.base import ToolRegistry, ToolResult
 
 logger = logging.getLogger("arc.orchestrator")
 
-MAX_TOOL_ITERATIONS = 12
+MAX_TOOL_ITERATIONS = 25
 TOOL_RESULT_CHAR_LIMIT = 6000
 
 

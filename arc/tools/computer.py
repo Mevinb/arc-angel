@@ -201,10 +201,65 @@ class OpenInterpreterTool(Tool):
         return ToolResult.success(text[:8000] or "(no output)")
 
 
+class ChromeVisibleTool(Tool):
+    """Pop Chrome visibly on the user's screen (Wayland DISPLAY=:1) and navigate."""
+
+    name = "computer.open_chrome"
+    description = ("Open a URL in Chrome visibly on the user's screen (Wayland, "
+                   "uses the existing Chrome profile so the user stays logged in). "
+                   "Use this when the user wants to SEE the browser pop up and "
+                   "interact with cursor. Handles chatgpt.com/login correctly.")
+    risk = RiskLevel.GREEN
+    parameters = {
+        "properties": {
+            "url": {"type": "string", "description": "URL to open (e.g. https://chatgpt.com)"},
+        },
+        "required": ["url"],
+    }
+
+    def run(self, url: str = "", **_: Any) -> ToolResult:
+        import os
+        import subprocess
+        if not url:
+            return ToolResult.failure("No URL provided")
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        # Ensure Wayland/Display are set for visible Chrome
+        env = os.environ.copy()
+        env.setdefault("DISPLAY", ":1")
+        env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+        env.setdefault("XDG_SESSION_TYPE", "wayland")
+        try:
+            # Try new-window in existing session first (fastest, preserves login)
+            result = subprocess.run(
+                ["google-chrome", "--new-window", url],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            # Check if it succeeded or fell back to existing session
+            if result.returncode == 0 or "Opening in existing browser session" in (result.stderr or ""):
+                return ToolResult.success(f"Chrome popped on your screen — {url}\n"
+                                          f"Use your cursor to interact. ARC can also drive it via browser.open(visible=true).")
+            # Fallback: xdg-open
+            subprocess.Popen(["xdg-open", url], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return ToolResult.success(f"Opened {url} via xdg-open on your display.")
+        except FileNotFoundError:
+            try:
+                subprocess.Popen(["xdg-open", url], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return ToolResult.success(f"Opened {url} via xdg-open.")
+            except Exception as exc:
+                return ToolResult.failure(f"Failed to open Chrome: {exc}")
+        except Exception as exc:
+            return ToolResult.failure(f"Failed to open Chrome: {exc}")
+
+
 def register_computer_tools(registry: Any, workdir: Optional[Path] = None) -> None:
     registry.register(ShellTool(workdir=workdir))
     registry.register(PythonTool())
     registry.register(OpenInterpreterTool())
+    registry.register(ChromeVisibleTool())
 
 
 __all__ = ["ShellTool", "PythonTool", "OpenInterpreterTool", "register_computer_tools",
