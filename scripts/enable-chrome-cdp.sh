@@ -13,9 +13,27 @@ while [[ $# -gt 0 ]]; do
 done
 UDD="${UDD:-${ARC_CHROME_USER_DATA_DIR:-$HOME/.config/google-chrome}}"
 UDD_EXPANDED="${UDD/#\~/$HOME}"
-echo "Chrome profile: $UDD_EXPANDED"
-echo "CDP port: $PORT"
-echo ""
+# Chrome 133+ requires non-default dir for --remote-debugging-port — use -arc sibling if default
+if [[ "$UDD_EXPANDED" == "$HOME/.config/google-chrome" ]]; then
+  DBG_UDD="$HOME/.config/google-chrome-arc"
+  echo "Chrome profile: $UDD_EXPANDED (real, for Library)"
+  echo "Debuggable profile: $DBG_UDD (copy, required for CDP — Chrome 133+ blocks default dir)"
+  echo "CDP port: $PORT"
+  echo ""
+  # Ensure debuggable profile exists as copy of real (preserves login)
+  if [[ ! -f "$DBG_UDD/Default/Cookies" ]]; then
+    echo "Copying profile $UDD_EXPANDED -> $DBG_UDD (preserves chatgpt.com login)..."
+    mkdir -p "$DBG_UDD"
+    cp -a "$UDD_EXPANDED/Default" "$DBG_UDD/" 2>/dev/null || true
+    cp -a "$UDD_EXPANDED/Local State" "$DBG_UDD/" 2>/dev/null || true
+    echo "Copy done."
+  fi
+  UDD_EXPANDED="$DBG_UDD"
+else
+  echo "Chrome profile: $UDD_EXPANDED"
+  echo "CDP port: $PORT"
+  echo ""
+fi
 
 # Patch .desktop so future clicks launch debuggable Chrome
 DESKTOP_SRC="/usr/share/applications/google-chrome.desktop"

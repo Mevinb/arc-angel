@@ -59,6 +59,26 @@ def _user_data_dir() -> Path:
     return Path.home() / ".config/google-chrome"
 
 
+def _debuggable_user_data_dir(real_dir: Path) -> Path:
+    """Chrome 133+ requires non-default data dir for --remote-debugging-port.
+    We use a separate dir that is a copy of the real profile (preserving login).
+    """
+    # If real_dir is already non-default (contains -arc or /tmp/chrome-arc), use it
+    name = real_dir.name
+    if "arc" in name or "chrome-arc" in str(real_dir):
+        return real_dir
+    # Check if real_dir is the default google-chrome — then use -arc sibling
+    if real_dir == Path.home() / ".config/google-chrome":
+        # Use persistent arc profile, not /tmp, so login survives reboot
+        arc_dir = Path.home() / ".config/google-chrome-arc"
+        # If /tmp/chrome-arc-live already exists and is newer, prefer it (current live)
+        tmp_live = Path("/tmp/chrome-arc-live")
+        if tmp_live.exists() and (tmp_live / "Default/Cookies").exists():
+            return tmp_live
+        return arc_dir
+    return real_dir
+
+
 def _resolve_user_data_dir_from_config() -> Path:
     """If ChromeManager was configured via App, use that; otherwise env/common."""
     # Check if a configured override was set via singleton
@@ -206,6 +226,7 @@ class ChromeManager:
             try:
                 if user_data_dir:
                     cls._instance._user_data_dir = Path(cls._configured_user_data_dir).expanduser()  # type: ignore[arg-type]
+                    cls._instance._debuggable_dir = _debuggable_user_data_dir(cls._instance._user_data_dir)  # type: ignore
                 if cdp_port is not None and cls._configured_cdp_port is not None:
                     cls._instance._cdp_port = cls._configured_cdp_port
                     cls._instance._cdp_url = f"http://127.0.0.1:{cls._configured_cdp_port}"
@@ -241,6 +262,7 @@ class ChromeManager:
             except Exception:
                 self._user_data_dir = _user_data_dir()
         self._daemon_proc: Optional[subprocess.Popen] = None
+        self._debuggable_dir: Path = _debuggable_user_data_dir(self._user_data_dir)  # type: ignore
         self._op_lock = threading.Lock()
 
     def _is_cdp_alive(self) -> bool:
@@ -262,10 +284,11 @@ class ChromeManager:
         cdp = "alive" if self._is_cdp_alive() else "down"
         existing = "running" if _has_existing_chrome_process() else "none"
         udd = str(self._user_data_dir)
+        dbg = str(getattr(self, "_debuggable_dir", _debuggable_user_data_dir(self._user_data_dir)))
         live_args = _detect_chrome_cmd_user_data_dir() or "default"
-        base = f"profile={udd} (live_args={live_args}) cdp=:{port} {cdp} chrome={existing} DISPLAY={_env().get('DISPLAY')}"
+        base = f"profile={udd} dbg={dbg} (live_args={live_args}) cdp=:{port} {cdp} chrome={existing} DISPLAY={_env().get('DISPLAY')}"
         if cdp == "down" and existing == "running":
-            base += f" — FIX: pkill chrome; google-chrome --remote-debugging-port={port} --user-data-dir={udd} --ozone-platform-hint=auto  (or ./scripts/enable-chrome-cdp.sh)"
+            base += f" — FIX: pkill chrome; google-chrome --remote-debugging-port={port} --user-data-dir={dbg} --ozone-platform-hint=auto  (or ./scripts/enable-chrome-cdp.sh)"
         return base
 
     def _thread_connect_or_launch(self) -> Any:
@@ -284,16 +307,38 @@ class ChromeManager:
             except Exception as exc:
                 logger.debug("CDP connect failed: %s", exc)
 
-        # 2) No Chrome at all -> launch debuggable helper with YOUR profile
+        # 2) No Chrome at all -> launch debuggable helper with YOUR profile (non-default dir for Chrome 133+)
         if not _has_existing_chrome_process():
             if self._daemon_proc is None or self._daemon_proc.poll() is not None:
                 try:
-                    # Ensure parent dir exists
-                    self._user_data_dir.mkdir(parents=True, exist_ok=True)
+                    # Chrome 133+ requires non-default data dir for remote debugging — use debuggable sibling
+                    dbg_dir = _debuggable_user_data_dir(self._user_data_dir)
+                    # If dbg_dir is different from real and doesn't yet have profile, copy key files
+                    if dbg_dir != self._user_data_dir and not (dbg_dir / "Default/Cookies").exists():
+                        try:
+                            dbg_dir.mkdir(parents=True, exist_ok=True)
+                            # Copy Default and Local State for login preservation
+                            import shutil
+                            src_default = self._user_data_dir / "Default"
+                            dst_default = dbg_dir / "Default"
+                            if src_default.exists() and not dst_default.exists():
+                                shutil.copytree(src_default, dst_default, dirs_exist_ok=True)
+                            src_state = self._user_data_dir / "Local State"
+                            dst_state = dbg_dir / "Local State"
+                            if src_state.exists() and not dst_state.exists():
+                                shutil.copy2(src_state, dst_state)
+                            logger.info("ChromeManager: copied profile %s -> %s for CDP", self._user_data_dir, dbg_dir)
+                        except Exception as exc:
+                            logger.debug("Profile copy for CDP failed: %s", exc)
+                            dbg_dir = self._user_data_dir
+                    else:
+                        dbg_dir.mkdir(parents=True, exist_ok=True)
+                    # Remember actual dbg_dir for later
+                    self._debuggable_dir = dbg_dir  # type: ignore[attr-defined]
                     self._daemon_proc = subprocess.Popen(
                         [
                             "google-chrome",
-                            f"--user-data-dir={self._user_data_dir}",
+                            f"--user-data-dir={dbg_dir}",
                             f"--remote-debugging-port={self._cdp_port}",
                             "--no-first-run",
                             "--no-default-browser-check",
@@ -338,11 +383,26 @@ class ChromeManager:
         # try persistent context only if lock free, otherwise instruct user.
         if _has_existing_chrome_process() and not self._is_cdp_alive():
             logger.info("ChromeManager: existing Chrome without CDP on :%s — will use xdg-open and fallback persistent context", self._cdp_port)
-            # Try persistent context with YOUR profile only if Playwright can acquire it (will fail if Singleton locked)
+            # Try persistent context with debuggable profile (non-default) — handles Chrome 133+ restriction
+            dbg_dir = getattr(self, "_debuggable_dir", _debuggable_user_data_dir(self._user_data_dir))
             try:
-                # Use same user-data-dir explicitly — Playwright will error if locked, we catch
+                # Ensure debuggable dir has profile copy if needed
+                if dbg_dir != self._user_data_dir and not (dbg_dir / "Default/Cookies").exists():
+                    try:
+                        import shutil
+                        dbg_dir.mkdir(parents=True, exist_ok=True)
+                        src_default = self._user_data_dir / "Default"
+                        dst_default = dbg_dir / "Default"
+                        if src_default.exists() and not dst_default.exists():
+                            shutil.copytree(src_default, dst_default, dirs_exist_ok=True)
+                        src_state = self._user_data_dir / "Local State"
+                        dst_state = dbg_dir / "Local State"
+                        if src_state.exists() and not dst_state.exists():
+                            shutil.copy2(src_state, dst_state)
+                    except Exception as exc:
+                        logger.debug("Profile copy for persistent context failed: %s", exc)
                 browser = self._pw.chromium.launch_persistent_context(
-                    user_data_dir=str(self._user_data_dir),
+                    user_data_dir=str(dbg_dir),
                     channel="chrome",
                     headless=False,
                     args=["--ozone-platform-hint=auto", "--disable-blink-features=AutomationControlled", "--no-first-run"],

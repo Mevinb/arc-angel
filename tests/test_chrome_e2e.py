@@ -127,8 +127,9 @@ def test_move_fallback_to_browser_when_ydotool_missing(tmp_path: Path):
     cfg.safety_mode = "auto"
     app = ArcApp(config=cfg, quiet=True)
     try:
-        # Force wayland_input to report missing ydotool, then ChromeControl should fallback to browser mouse
+        # Force wayland_input to report missing ydotool/uinput, then ChromeControl should fallback to browser mouse
         with patch("arc.tools.wayland_input._has", return_value=False), \
+             patch("arc.tools.wayland_input.move_click", return_value=(False, "No backend")), \
              patch("arc.tools.chrome_manager.ChromeManager.instance") as mock_mgr:
             fake_page = MagicMock()
             fake_page.url = "https://chatgpt.com/"
