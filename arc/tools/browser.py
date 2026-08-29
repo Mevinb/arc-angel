@@ -492,6 +492,8 @@ class ChromeControlTool(Tool):
             return ToolResult.failure(f"Chrome not ready: {exc}. Try 'open' first.")
 
         def _do_action(page) -> ToolResult:  # runs on manager thread
+            # If we're on dummy (real Chrome without CDP), Playwright ops will raise "CDP disabled" — fallback to OS
+            is_dummy = page.__class__.__name__ == "_DummyPage" or "CDP disabled" in str(getattr(page, "title", lambda: "")())
             if action_l == "click":
                 # Support "selector" or "x,y" — for x,y also warp OS cursor when possible (dual)
                 if "," in tgt and tgt.replace(",", "").replace(" ", "").isdigit():
@@ -504,34 +506,123 @@ class ChromeControlTool(Tool):
                         _mc(x_i, y_i, "left")
                     except Exception:
                         pass
-                    page.mouse.click(x_i, y_i)
-                    page.wait_for_timeout(800)
+                    try:
+                        page.mouse.click(x_i, y_i)
+                    except Exception as exc:
+                        if "CDP disabled" in str(exc):
+                            # Already did OS click via _mc, so success even if browser click failed
+                            return ToolResult.success(f"Clicked at {tgt!r} via OS (CDP disabled, your real Chrome)")
+                        raise
+                    try:
+                        page.wait_for_timeout(800)
+                    except Exception:
+                        pass
                     return ToolResult.success(f"Clicked at {tgt!r} — {page.url[:80]} (browser + OS best-effort)")
-                page.click(tgt, timeout=10000)
-                page.wait_for_timeout(800)
-                return ToolResult.success(f"Clicked {tgt!r} — {page.url[:80]}")
+                # Selector click — try Playwright, fallback to instruction if dummy
+                try:
+                    page.click(tgt, timeout=10000)
+                    try:
+                        page.wait_for_timeout(800)
+                    except Exception:
+                        pass
+                    return ToolResult.success(f"Clicked {tgt!r} — {page.url[:80]}")
+                except Exception as exc:
+                    if is_dummy or "CDP disabled" in str(exc):
+                        return ToolResult.failure(
+                            f"Click {tgt!r} needs CDP. Your Chrome runs without --remote-debugging-port, so I used your real window via xdg-open but can't click selector without CDP. "
+                            f"Fix: restart Chrome: google-chrome --remote-debugging-port={mgr._cdp_port} --user-data-dir={mgr._user_data_dir} --ozone-platform-hint=auto  — then retry. "
+                            f"Workaround: use click with coordinates e.g. '800,400' via wayland."
+                        )
+                    raise
             if action_l == "type":
                 selector = tgt
                 text = value or tgt
+                # If dummy/CDP disabled, directly use OS typing (your real window is focused via bring_to_front/xdg-open)
+                if is_dummy:
+                    try:
+                        from .wayland_input import type_text as _tt
+                        ok, msg = _tt(text)
+                        if ok:
+                            return ToolResult.success(f"Typed {len(text)} chars into {selector!r} via OS ({msg}) — your real Chrome")
+                        return ToolResult.failure(f"OS typing failed: {msg}. Need wtype: sudo apt install wtype")
+                    except Exception as exc:
+                        return ToolResult.failure(f"Type fallback failed: {exc}")
                 if value and selector and not selector.isdigit():
-                    # If selector looks like a CSS selector, fill it; else keyboard type
                     try:
                         page.fill(selector, text, timeout=8000)
-                    except Exception:
+                    except Exception as exc:
+                        if "CDP disabled" in str(exc):
+                            # Fallback to OS
+                            try:
+                                from .wayland_input import type_text as _tt
+                                ok, msg = _tt(text)
+                                if ok:
+                                    return ToolResult.success(f"Typed {len(text)} chars via OS ({msg})")
+                            except Exception:
+                                pass
+                            return ToolResult.failure(f"Fill {selector!r} needs CDP (your Chrome lacks --remote-debugging-port). Use type_system instead or restart Chrome with CDP.")
                         # Fallback: focus then type
                         try:
                             page.focus(selector, timeout=5000)
                         except Exception:
                             pass
-                        page.keyboard.type(text)
+                        try:
+                            page.keyboard.type(text)
+                        except Exception as exc2:
+                            if "CDP disabled" in str(exc2):
+                                from .wayland_input import type_text as _tt
+                                ok, msg = _tt(text)
+                                if ok:
+                                    return ToolResult.success(f"Typed {len(text)} chars via OS ({msg})")
+                                raise
+                            raise
                 else:
-                    page.keyboard.type(text)
-                page.wait_for_timeout(500)
+                    try:
+                        page.keyboard.type(text)
+                    except Exception as exc:
+                        if "CDP disabled" in str(exc):
+                            from .wayland_input import type_text as _tt
+                            ok, msg = _tt(text)
+                            if ok:
+                                return ToolResult.success(f"Typed {len(text)} chars via OS ({msg})")
+                            raise
+                        raise
+                try:
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
                 return ToolResult.success(f"Typed {len(text)} chars into {selector!r}")
             if action_l == "press":
-                page.keyboard.press(tgt)
-                page.wait_for_timeout(500)
-                return ToolResult.success(f"Pressed {tgt}")
+                try:
+                    page.keyboard.press(tgt)
+                    try:
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+                    return ToolResult.success(f"Pressed {tgt}")
+                except Exception as exc:
+                    if is_dummy or "CDP disabled" in str(exc):
+                        # Try OS-level via wtype -k if available, else instruct
+                        try:
+                            import subprocess, shutil
+                            if shutil.which("wtype"):
+                                # wtype handles Enter etc. via typing newline for Enter
+                                if tgt.lower() == "enter":
+                                    from .wayland_input import type_text as _tt
+                                    ok, msg = _tt("\n")
+                                    if ok:
+                                        return ToolResult.success(f"Pressed {tgt} via OS ({msg})")
+                                else:
+                                    # Try wtype -k (best-effort)
+                                    subprocess.run(["wtype", "-k", tgt], timeout=5)
+                                    return ToolResult.success(f"Pressed {tgt} via wtype")
+                        except Exception:
+                            pass
+                        return ToolResult.failure(
+                            f"Press {tgt!r} needs CDP. Your Chrome lacks --remote-debugging-port. "
+                            f"Fix: google-chrome --remote-debugging-port={mgr._cdp_port} --user-data-dir={mgr._user_data_dir} — then retry. Workaround: use ydotool key."
+                        )
+                    raise
             if action_l == "wait":
                 ms = int(tgt) if tgt.isdigit() else 2000
                 page.wait_for_timeout(min(ms, 10000))

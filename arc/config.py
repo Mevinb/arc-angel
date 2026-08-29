@@ -69,6 +69,11 @@ DEFAULTS: Dict[str, Any] = {
         "vad_aggressiveness": 3,
         "confidence_threshold": 0.6,
     },
+    "browser": {
+        "user_data_dir": "~/.config/google-chrome",
+        "cdp_port": 9222,
+        "ozone": "auto",
+    },
 }
 
 _ENV_OVERRIDES = {
@@ -80,6 +85,9 @@ _ENV_OVERRIDES = {
     ("voice", "stt_model"): "ARC_VOICE_STT_MODEL",
     ("voice", "tts"): "ARC_VOICE_TTS",
     ("voice", "device"): "ARC_VOICE_DEVICE",
+    ("browser", "user_data_dir"): "ARC_CHROME_USER_DATA_DIR",
+    ("browser", "cdp_port"): "ARC_CHROME_CDP_PORT",
+    ("browser", "ozone"): "ARC_CHROME_OZONE",
 }
 _ENV_MODEL_OVERRIDES = {
     "fast": "ARC_MODEL_FAST",
@@ -168,6 +176,7 @@ class ArcConfig:
     gmail: Dict[str, str]
     skills: Dict[str, str] = field(default_factory=dict)
     voice: Dict[str, Any] = field(default_factory=dict)
+    browser: Dict[str, Any] = field(default_factory=dict)
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
     config_path: Path = field(default_factory=lambda: PROJECT_ROOT / "config" / "config.yaml")
 
@@ -249,6 +258,18 @@ def load_config(project_root: Path | None = None,
         "vad_aggressiveness": int(voice_raw.get("vad_aggressiveness", 2)),
         "confidence_threshold": float(voice_raw.get("confidence_threshold", 0.6)),
     }
+    # Browser — your live Chrome profile
+    browser_raw = raw.get("browser", {})
+    browser = {
+        "user_data_dir": str(browser_raw.get("user_data_dir", "~/.config/google-chrome")),
+        "cdp_port": int(browser_raw.get("cdp_port", 9222)),
+        "ozone": str(browser_raw.get("ozone", "auto")),
+    }
+    # cdp_port may be str from env, coerce
+    try:
+        browser["cdp_port"] = int(browser["cdp_port"])
+    except Exception:
+        browser["cdp_port"] = 9222
     # Env overrides for voice (catch-all for ARC_VOICE_*)
     for key in list(voice.keys()):
         env_name = f"ARC_VOICE_{key.upper()}"
@@ -279,6 +300,7 @@ def load_config(project_root: Path | None = None,
         gmail={k: str(v) for k, v in raw.get("gmail", {}).items()},
         skills={k: str(v) for k, v in raw.get("skills", {}).items()},
         voice=voice,
+        browser=browser,
         data_dir=data_dir,
         config_path=config_yaml,
     )

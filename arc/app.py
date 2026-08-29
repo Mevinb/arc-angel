@@ -46,6 +46,17 @@ class ArcApp:
         self.guard = PermissionGuard(mode=self.config.safety_mode,
                                      approver=approver)
         self.registry = ToolRegistry(self.guard)
+        # Wire your real Chrome profile into the singleton so Library/image-gen uses your login
+        try:
+            from .tools.chrome_manager import ChromeManager
+
+            browser_cfg = getattr(self.config, "browser", {}) or {}
+            ChromeManager.configure(
+                user_data_dir=browser_cfg.get("user_data_dir"),
+                cdp_port=browser_cfg.get("cdp_port"),
+            )
+        except Exception:
+            pass
 
         # Skills (SKILL.md collection) — optional; degrades to no-op if absent.
         # Extra catalog sources (awesome-ai-agent-tools & co.) are auto-discovered
@@ -142,6 +153,17 @@ class ArcApp:
             if hasattr(tool, "availability"):
                 report["optional"][tool.name] = tool.availability()
         report["optional"]["gmail.oauth"] = self.gmail_engine.availability_message()
+        # Your real Chrome — so image-gen uses your logged-in Library
+        try:
+            from .tools.chrome_manager import ChromeManager
+
+            report["optional"]["chrome.profile"] = ChromeManager.instance().availability()
+        except Exception as exc:  # noqa: BLE001
+            report["optional"]["chrome.profile"] = f"unavailable: {exc}"
+        report["optional"]["chrome.config"] = (
+            f"user_data_dir={self.config.browser.get('user_data_dir')} "
+            f"cdp_port={self.config.browser.get('cdp_port')} ozone={self.config.browser.get('ozone')}"
+        )
         report["skills"] = self._skills_report()
         return report
 
