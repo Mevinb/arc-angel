@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Optional
@@ -138,6 +140,13 @@ class PermissionGuard:
         self.mode = mode
         self.approver = approver
         self._counts = {"approved": 0, "denied": 0, "auto_green": 0, "blocked": 0}
+        # Task/session-scoped approvals — once permission is given for a task,
+        # don't re-prompt for every single YELLOW/RED within that scope.
+        self._task_approvals: Dict[RiskLevel, float] = {}
+        self._session_approvals: Dict[RiskLevel, float] = {}
+        self._task_ttl: int = 600  # 10 min for "approve all for this task"
+        self._session_ttl: int = 3600  # 1 hour for "approve all for session"
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ api
     def risk_for(self, tool: str, details: str = "",
@@ -151,6 +160,57 @@ class PermissionGuard:
             risk = highest_risk(risk, command_risk)
         return risk
 
+    # ---------------------------------------------------------------- task/session approvals
+    def _is_task_or_session_approved(self, risk: RiskLevel) -> Optional[str]:
+        """Check if a task/session approval covers this risk (with expiry)."""
+        now = time.time()
+        with self._lock:
+            # session approvals persist longer
+            for scope, store in (("session", self._session_approvals), ("task", self._task_approvals)):
+                for level, expiry in list(store.items()):
+                    if now > expiry:
+                        del store[level]
+                        continue
+                    # RED approval implies YELLOW too
+                    if level == RiskLevel.RED and risk in (RiskLevel.YELLOW, RiskLevel.RED):
+                        return scope
+                    if level == risk:
+                        return scope
+        return None
+
+    def approve_for_task(self, risk: RiskLevel, scope: str = "task", ttl: Optional[int] = None) -> None:
+        """Grant auto-approval for all actions of this risk (and lower) in scope.
+
+        scope: "task" (default 10 min) or "session" (1 hour). Voice/terminal
+        approvers call this when user says "yes for all" / "approve session".
+        """
+        if scope == "session":
+            ttl = ttl or self._session_ttl
+            store = self._session_approvals
+        else:
+            ttl = ttl or self._task_ttl
+            store = self._task_approvals
+        expiry = time.time() + ttl
+        with self._lock:
+            if risk == RiskLevel.RED:
+                store[RiskLevel.RED] = expiry
+                store[RiskLevel.YELLOW] = expiry
+            else:
+                store[risk] = expiry
+        logger.info("Approved %s for %s until %.0f (ttl=%ds)", risk.value, scope, expiry, ttl)
+
+    def clear_task_approvals(self) -> None:
+        with self._lock:
+            self._task_approvals.clear()
+
+    def clear_session_approvals(self) -> None:
+        with self._lock:
+            self._session_approvals.clear()
+
+    def clear_all_approvals(self) -> None:
+        self.clear_task_approvals()
+        self.clear_session_approvals()
+
     def evaluate(self, action: Action) -> Decision:
         """Decide whether an action may proceed in the current mode."""
         risk = highest_risk(action.risk,
@@ -159,6 +219,12 @@ class PermissionGuard:
         if risk == RiskLevel.GREEN:
             self._counts["auto_green"] += 1
             return Decision(True, risk, "read-only action")
+
+        # Task/session-scoped approvals — once permission given for a task, don't re-ask per-cmd
+        approved_scope = self._is_task_or_session_approved(risk)
+        if approved_scope is not None:
+            self._counts["approved"] += 1
+            return Decision(True, risk, f"{approved_scope} approved")
 
         if self.mode == "yolo":
             logger.warning("YOLO mode: auto-approving %s action %r", risk.value, action.tool)

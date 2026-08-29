@@ -130,9 +130,10 @@ class TestVoiceApprover:
         stt = FakeSTT(script=["maybe"])
         tts = FakeTTS()
         approver = VoiceApprover(stt=stt, tts=tts, fallback_to_text=True)
-        # Mock Confirm.ask to return True
+        # Mock Prompt/Confirm.ask to return True (approver now uses Prompt with all/session support)
         import arc.voice.session as sess
 
+        monkeypatch.setattr("rich.prompt.Prompt.ask", lambda *a, **kw: "y")
         monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **kw: True)
 
         class FakeAction:

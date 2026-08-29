@@ -79,7 +79,32 @@ class TerminalUI:
             ),
             title="Approval required", border_style=style))
         try:
-            return Confirm.ask("Allow this?", default=False, console=self.console)
+            # Offer task/session-scoped approvals so user isn't asked per-cmd
+            choice = Prompt.ask(
+                "Allow this?",
+                choices=["y", "n", "a", "s", "yes", "no", "all", "session"],
+                default="n",
+                show_choices=False,
+                console=self.console,
+            ).strip().lower()
+            if choice in ("y", "yes"):
+                return True
+            if choice in ("a", "all", "always"):
+                # Approve all YELLOW (and RED if this was RED) for this task
+                try:
+                    self.app.guard.approve_for_task(action.risk, scope="task")
+                except Exception:
+                    pass
+                self.console.print("[dim]Approved for this task — won't ask again for similar actions.[/dim]")
+                return True
+            if choice in ("s", "session"):
+                try:
+                    self.app.guard.approve_for_task(action.risk, scope="session")
+                except Exception:
+                    pass
+                self.console.print("[dim]Approved for session — won't ask again this session.[/dim]")
+                return True
+            return False
         except (KeyboardInterrupt, EOFError):
             return False
         finally:

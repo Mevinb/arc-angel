@@ -116,6 +116,10 @@ class VoiceApprover:
     Called by PermissionGuard via `app.set_approver`. Speaks the request,
     listens for natural language, falls back to text Confirm.ask on low
     confidence or unclear.
+
+    Supports task/session approvals: if user says "yes for all" / "approve
+    all for this task" / "yes for session", the guard is told to auto-approve
+    subsequent similar actions so we don't ask per-cmd.
     """
 
     def __init__(
@@ -125,19 +129,30 @@ class VoiceApprover:
         console: Optional[Console] = None,
         confidence_threshold: float = 0.6,
         fallback_to_text: bool = True,
+        guard: Optional[Any] = None,
     ) -> None:
         self.stt = stt
         self.tts = tts
         self.console = console or Console()
         self.threshold = confidence_threshold
         self.fallback_to_text = fallback_to_text
+        self.guard = guard
+
+    def _is_approve_all_phrase(self, text: str) -> Optional[str]:
+        t = (text or "").lower()
+        if any(k in t for k in ("for all", "always", "approve all", "all task", "all for")):
+            return "task"
+        if "session" in t:
+            return "session"
+        return None
 
     def __call__(self, action) -> bool:
         # Speak the approval request in human language
         risk = getattr(action, "risk", None)
         risk_str = getattr(risk, "value", str(risk)) if risk else "unknown"
         desc = getattr(action, "description", str(action))[:500]
-        prompt = f"{risk_str} action: {desc}. Say yes to approve, or no to deny."
+        # Hint for task/session approval so user knows they can say "yes for all"
+        prompt = f"{risk_str} action: {desc}. Say yes to approve, no to deny, or yes for all to approve this task."
         logger.info("VoiceApprover: %s", prompt)
         try:
             self.tts.speak(prompt)
@@ -153,6 +168,17 @@ class VoiceApprover:
             if text and conf >= self.threshold:
                 decision = parse_approval(text)
                 if decision is not None:
+                    if decision and self.guard is not None:
+                        scope = self._is_approve_all_phrase(text)
+                        if scope is not None and risk is not None:
+                            try:
+                                # Approve all of this risk (and lower) for task/session
+                                self.guard.approve_for_task(risk, scope=scope)  # type: ignore[arg-type]
+                                self.tts.speak(f"Approved for {scope}. Won't ask again for similar actions.")
+                                logger.info("Voice task approval: %r -> %s scope=%s", text, decision, scope)
+                                return True
+                            except Exception as exc:
+                                logger.debug("guard.approve_for_task failed: %s", exc)
                     self.tts.speak("Approved." if decision else "Denied.")
                     logger.info("Voice approval: %r -> %s", text, decision)
                     return bool(decision)
@@ -164,11 +190,20 @@ class VoiceApprover:
                 conf2 = float(getattr(tx2, "confidence", 0.0) or 0.0)
                 decision2 = parse_approval(text2)
                 if decision2 is not None and conf2 >= self.threshold:
+                    if decision2 and self.guard is not None:
+                        scope2 = self._is_approve_all_phrase(text2)
+                        if scope2 is not None and risk is not None:
+                            try:
+                                self.guard.approve_for_task(risk, scope=scope2)  # type: ignore[arg-type]
+                                self.tts.speak(f"Approved for {scope2}.")
+                                return True
+                            except Exception:
+                                pass
                     self.tts.speak("Approved." if decision2 else "Denied.")
                     return bool(decision2)
-            # Low confidence or empty — fallback to text
+            # Low confidence or empty — fallback to text (support all/session here too)
             if self.fallback_to_text:
-                from rich.prompt import Confirm
+                from rich.prompt import Prompt
 
                 try:
                     # Need to stop any ongoing TTS so prompt is visible
@@ -176,14 +211,61 @@ class VoiceApprover:
                 except Exception:
                     pass
                 self.console.print(f"[dim]Voice approval unclear ({text!r} conf={conf:.2f}) — falling back to text.[/dim]")
-                return bool(Confirm.ask("Allow this?", default=False, console=self.console))
+                try:
+                    choice = Prompt.ask(
+                        "Allow this? [y/n/all/session]",
+                        choices=["y", "n", "a", "s", "yes", "no", "all", "session"],
+                        default="n",
+                        show_choices=False,
+                        console=self.console,
+                    ).strip().lower()
+                except Exception:
+                    return False
+                if choice in ("y", "yes"):
+                    return True
+                if choice in ("a", "all", "always") and self.guard is not None and risk is not None:
+                    try:
+                        self.guard.approve_for_task(risk, scope="task")  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+                    return True
+                if choice in ("s", "session") and self.guard is not None and risk is not None:
+                    try:
+                        self.guard.approve_for_task(risk, scope="session")  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+                    return True
+                return False
             return False
         except Exception as exc:
             logger.warning("VoiceApprover failed: %s", exc)
             if self.fallback_to_text:
-                from rich.prompt import Confirm
+                from rich.prompt import Prompt
 
-                return bool(Confirm.ask("Allow this?", default=False, console=self.console))
+                try:
+                    choice = Prompt.ask(
+                        "Allow this? [y/n/all/session]",
+                        choices=["y", "n", "a", "s", "yes", "no", "all", "session"],
+                        default="n",
+                        show_choices=False,
+                        console=self.console,
+                    ).strip().lower()
+                    if choice in ("y", "yes"):
+                        return True
+                    if choice in ("a", "all", "always") and self.guard is not None and risk is not None:
+                        try:
+                            self.guard.approve_for_task(risk, scope="task")  # type: ignore[arg-type]
+                        except Exception:
+                            pass
+                        return True
+                    if choice in ("s", "session") and self.guard is not None and risk is not None:
+                        try:
+                            self.guard.approve_for_task(risk, scope="session")  # type: ignore[arg-type]
+                        except Exception:
+                            pass
+                        return True
+                except Exception:
+                    return False
             return False
 
 
@@ -227,16 +309,26 @@ class VoiceSession:
 
         # Install voice approver if allowed
         if allow_voice_approval:
+            # Pass guard so "yes for all" can set task/session approvals
+            try:
+                guard_ref = getattr(self.app, "guard", None)
+            except Exception:
+                guard_ref = None
             self._approver = VoiceApprover(
                 stt=self.stt,
                 tts=self.tts,
                 console=self.console,
                 confidence_threshold=confidence_threshold,
+                guard=guard_ref,
             )
             try:
                 self.app.set_approver(self._approver)
             except Exception as exc:
                 logger.debug("set_approver failed: %s", exc)
+            # Keep guard in sync if app guard is swapped later
+            if guard_ref is not None and hasattr(guard_ref, "approver"):
+                # ensure approver's guard stays current (for tests that swap guard)
+                self._approver.guard = guard_ref
 
     # ------------------------------------------------------------------ internals
 

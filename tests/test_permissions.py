@@ -110,3 +110,116 @@ class TestGuardModes:
         stats = guard.stats()
         assert stats["auto_green"] == 1
         assert stats["denied"] == 1
+
+
+class TestTaskSessionApprovals:
+    def test_task_approval_auto_approves_same_risk(self):
+        guard = PermissionGuard(mode="interactive", approver=lambda a: False)
+        guard.approve_for_task(RiskLevel.YELLOW, scope="task")
+        action = Action(tool="file.write", description="write", risk=RiskLevel.YELLOW)
+        assert guard.evaluate(action).allowed
+        assert guard.evaluate(action).reason == "task approved"
+
+    def test_task_red_approves_yellow(self):
+        guard = PermissionGuard(mode="interactive", approver=lambda a: False)
+        guard.approve_for_task(RiskLevel.RED, scope="task")
+        yellow = Action(tool="file.write", description="write", risk=RiskLevel.YELLOW)
+        red = Action(tool="email.send", description="send", risk=RiskLevel.RED)
+        assert guard.evaluate(yellow).allowed
+        assert guard.evaluate(red).allowed
+
+    def test_yellow_task_does_not_approve_red(self):
+        guard = PermissionGuard(mode="interactive", approver=lambda a: False)
+        guard.approve_for_task(RiskLevel.YELLOW, scope="task")
+        red = Action(tool="email.send", description="send", risk=RiskLevel.RED)
+        assert not guard.evaluate(red).allowed
+
+    def test_session_persists_after_clear_task(self):
+        guard = PermissionGuard(mode="interactive", approver=lambda a: False)
+        guard.approve_for_task(RiskLevel.YELLOW, scope="session")
+        guard.clear_task_approvals()
+        yellow = Action(tool="file.write", description="write", risk=RiskLevel.YELLOW)
+        assert guard.evaluate(yellow).allowed
+        guard.clear_session_approvals()
+        assert not guard.evaluate(yellow).allowed
+
+    def test_task_cleared_after_handle(self, tmp_path):
+        # Simulate Orchestrator clearing task approvals after a turn
+        from arc.config import load_config
+        from arc.app import ArcApp
+        from tests.conftest import make_router, FakeMessage, FakeResponse, FakeToolCall
+        from arc.tools.base import Tool, ToolResult
+
+        def _tool_call(name):
+            return FakeResponse(FakeMessage(content="", tool_calls=[FakeToolCall("c1", name, {})]))
+
+        class YellowTool(Tool):
+            name = "test.yellow"
+            risk = RiskLevel.YELLOW
+            parameters = {"properties": {}, "required": []}
+            def run(self, **_): return ToolResult.success("ok")
+
+        cfg = load_config(project_root=tmp_path)
+        cfg.safety_mode = "interactive"
+        app = ArcApp(config=cfg, quiet=True)
+        app.registry.register(YellowTool())
+        calls = []
+
+        def approver(a: Action):
+            calls.append(1)
+            app.guard.approve_for_task(a.risk, scope="task")
+            return True
+
+        app.guard.approver = approver
+        router = make_router([_tool_call("test.yellow"), _tool_call("test.yellow"), FakeResponse(FakeMessage("done"))])
+        app.orchestrator.router = router
+        app.orchestrator.handle("do yellows")
+        # First tool asked, next auto-approved
+        assert len(calls) == 1
+        # After handle, task approvals cleared, next yellow should ask again
+        router2 = make_router([_tool_call("test.yellow"), FakeResponse(FakeMessage("done2"))])
+        app.orchestrator.router = router2
+        calls.clear()
+        app.orchestrator.handle("another yellow")
+        assert len(calls) == 1
+        app.close()
+
+    def test_only_one_prompt_per_task_via_orchestrator(self, tmp_path):
+        from arc.config import load_config
+        from arc.app import ArcApp
+        from tests.conftest import make_router, FakeMessage, FakeResponse, FakeToolCall
+        from arc.tools.base import Tool, ToolResult
+
+        def _tool_call(name):
+            return FakeResponse(FakeMessage(content="", tool_calls=[FakeToolCall("c1", name, {})]))
+
+        class YellowTool(Tool):
+            name = "test.yellow2"
+            risk = RiskLevel.YELLOW
+            parameters = {"properties": {}, "required": []}
+            def run(self, **_): return ToolResult.success("ok")
+
+        cfg = load_config(project_root=tmp_path)
+        cfg.safety_mode = "interactive"
+        app = ArcApp(config=cfg, quiet=True)
+        app.registry.register(YellowTool())
+        approver_calls = []
+
+        def approver(a: Action):
+            approver_calls.append(a.tool)
+            # Simulate user saying "yes for all this task" on first prompt
+            app.guard.approve_for_task(RiskLevel.YELLOW, scope="task")
+            return True
+
+        app.guard.approver = approver
+        router = make_router([
+            _tool_call("test.yellow2"),
+            _tool_call("test.yellow2"),
+            _tool_call("test.yellow2"),
+            FakeResponse(FakeMessage("done")),
+        ])
+        app.orchestrator.router = router
+        turn = app.orchestrator.handle("do three")
+        assert turn.tool_calls == 3
+        assert len(approver_calls) == 1  # only first asked
+        app.close()

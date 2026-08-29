@@ -140,70 +140,80 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ loop
     def handle(self, user_message: str) -> AgentTurn:
-        """Process one user message through the full agent loop."""
+        """Process one user message through the full agent loop.
+
+        Task-scoped approvals (from "yes for all this task") are cleared after
+        the turn so the next user task starts fresh; session approvals persist.
+        """
         self.conversation.add("user", user_message)
         turn = AgentTurn(reply="")
         messages = self._messages()
+        try:
+            for iteration in range(1, self.max_iterations + 1):
+                turn.iterations = iteration
+                try:
+                    response = self.router.complete(
+                        messages,
+                        role=ModelRole.REASONING,
+                        tools=self.registry.schemas(),
+                    )
+                except ModelUnavailableError as exc:
+                    turn.reply = (
+                        "I could not reach any LLM backend. Check that OmniRoute (or "
+                        f"your OpenAI-compatible gateway) is running.\nDetails: {exc}")
+                    self.conversation.add("assistant", turn.reply)
+                    return turn
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("LLM call failed")
+                    turn.reply = f"The model request failed unexpectedly: {exc}"
+                    self.conversation.add("assistant", turn.reply)
+                    return turn
 
-        for iteration in range(1, self.max_iterations + 1):
-            turn.iterations = iteration
+                turn.model = response.model
+                if not response.has_tool_calls:
+                    turn.reply = response.content or "(no response)"
+                    self.conversation.add("assistant", turn.reply)
+                    return turn
+
+                # Record the assistant's tool-call message verbatim, then execute.
+                messages.append(self._assistant_message(response))
+                self.conversation.messages.append(self._assistant_message(response))
+                for call in response.tool_calls:
+                    result = self.registry.call(call.name, call.arguments)
+                    rendered = self._render_result(result)
+                    # Gateways may sanitize tool names (dots -> underscores); show
+                    # the resolved name in logs/UI, but keep the model's verbatim
+                    # name in API-facing history (providers expect it back).
+                    resolved = self.registry.resolve(call.name)
+                    display_name = resolved.name if resolved else call.name
+                    turn.tool_calls += 1
+                    turn.tool_log.append({
+                        "tool": display_name,
+                        "arguments": call.arguments,
+                        "ok": result.ok,
+                        "output": result.output[:500],
+                    })
+                    self._emit("tool_result", {"tool": display_name, "ok": result.ok,
+                                               "output": result.output[:2000]})
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": rendered,
+                    }
+                    messages.append(tool_message)
+                    self.conversation.add_tool_result(call.id, rendered)
+
+            turn.reply = ("I hit my tool-use limit for this request "
+                          f"({self.max_iterations} steps). Here is what I gathered so far:\n"
+                          + (turn.tool_log[-1]["output"] if turn.tool_log else ""))
+            self.conversation.add("assistant", turn.reply)
+            return turn
+        finally:
+            # Clear task-scoped approvals so next user message asks again (session stays)
             try:
-                response = self.router.complete(
-                    messages,
-                    role=ModelRole.REASONING,
-                    tools=self.registry.schemas(),
-                )
-            except ModelUnavailableError as exc:
-                turn.reply = (
-                    "I could not reach any LLM backend. Check that OmniRoute (or "
-                    f"your OpenAI-compatible gateway) is running.\nDetails: {exc}")
-                self.conversation.add("assistant", turn.reply)
-                return turn
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("LLM call failed")
-                turn.reply = f"The model request failed unexpectedly: {exc}"
-                self.conversation.add("assistant", turn.reply)
-                return turn
-
-            turn.model = response.model
-            if not response.has_tool_calls:
-                turn.reply = response.content or "(no response)"
-                self.conversation.add("assistant", turn.reply)
-                return turn
-
-            # Record the assistant's tool-call message verbatim, then execute.
-            messages.append(self._assistant_message(response))
-            self.conversation.messages.append(self._assistant_message(response))
-            for call in response.tool_calls:
-                result = self.registry.call(call.name, call.arguments)
-                rendered = self._render_result(result)
-                # Gateways may sanitize tool names (dots -> underscores); show
-                # the resolved name in logs/UI, but keep the model's verbatim
-                # name in API-facing history (providers expect it back).
-                resolved = self.registry.resolve(call.name)
-                display_name = resolved.name if resolved else call.name
-                turn.tool_calls += 1
-                turn.tool_log.append({
-                    "tool": display_name,
-                    "arguments": call.arguments,
-                    "ok": result.ok,
-                    "output": result.output[:500],
-                })
-                self._emit("tool_result", {"tool": display_name, "ok": result.ok,
-                                           "output": result.output[:2000]})
-                tool_message = {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": rendered,
-                }
-                messages.append(tool_message)
-                self.conversation.add_tool_result(call.id, rendered)
-
-        turn.reply = ("I hit my tool-use limit for this request "
-                      f"({self.max_iterations} steps). Here is what I gathered so far:\n"
-                      + (turn.tool_log[-1]["output"] if turn.tool_log else ""))
-        self.conversation.add("assistant", turn.reply)
-        return turn
+                self.registry.guard.clear_task_approvals()
+            except Exception:
+                pass
 
     def reset(self) -> None:
         self.conversation.clear()
