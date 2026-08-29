@@ -317,18 +317,28 @@ class PlaywrightTool(Tool):
                         "a[href]",
                         "els => els.slice(0, 40).map(e => ({href: e.href, text: e.innerText.slice(0,120)}))",
                     )
+                    # Also extract image URLs (for ChatGPT image gen, cdn.oaistatic.com etc.)
+                    try:
+                        images = p.eval_on_selector_all(
+                            "img[src]",
+                            "els => els.slice(0, 20).map(e => e.src).filter(src => src.includes('oai') || src.includes('cdn') || src.includes('files.') || src.includes('blob:') || src.match(/\\.(png|jpg|jpeg|webp)/i))",
+                        )
+                    except Exception:
+                        images = []
                     shot_path = ""
                     if screenshot:
                         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
                         target = self.screenshot_dir / (re.sub(r"\W+", "_", url)[:80] + ".png")
                         p.screenshot(path=str(target), full_page=False)
                         shot_path = str(target)
-                    return title, text, links, shot_path
+                    return title, text, links, images, shot_path
 
                 mgr = ChromeManager.instance()
-                title, text, links, shot_path = mgr.do(_extract)  # type: ignore[arg-type]
+                title, text, links, images, shot_path = mgr.do(_extract)  # type: ignore[arg-type]
                 output = f"# {title}\n{text}\n\n[visible Chrome — {url} — same window reused, logged-in]"
-                return ToolResult.success(output, url=url, title=title, links=links, screenshot=shot_path)
+                if images:
+                    output += f"\n\n[images: {', '.join(images[:5])}]"
+                return ToolResult.success(output, url=url, title=title, links=links, images=images, screenshot=shot_path)
             except Exception as exc:
                 logger.debug("ChromeManager visible failed, falling back to headless: %s", exc)
 
@@ -346,6 +356,13 @@ class PlaywrightTool(Tool):
                     "a[href]",
                     "els => els.slice(0, 40).map(e => ({href: e.href, text: e.innerText.slice(0,120)}))",
                 )
+                try:
+                    images = page.eval_on_selector_all(
+                        "img[src]",
+                        "els => els.slice(0, 20).map(e => e.src).filter(src => src.includes('oai') || src.includes('cdn') || src.includes('files.') || src.match(/\\.(png|jpg|jpeg|webp)/i))",
+                    )
+                except Exception:
+                    images = []
                 shot_path = ""
                 if screenshot:
                     self.screenshot_dir.mkdir(parents=True, exist_ok=True)
@@ -353,7 +370,10 @@ class PlaywrightTool(Tool):
                     page.screenshot(path=str(target), full_page=False)
                     shot_path = str(target)
                 browser.close()
-                return ToolResult.success(f"# {title}\n{text}", url=url, title=title, links=links, screenshot=shot_path)
+                header = f"# {title}\n{text}"
+                if images:
+                    header += f"\n\n[images: {', '.join(images[:5])}]"
+                return ToolResult.success(header, url=url, title=title, links=links, images=images, screenshot=shot_path)
 
         import concurrent.futures
 
@@ -631,6 +651,16 @@ class ChromeControlTool(Tool):
                 self.screenshot_dir.mkdir(parents=True, exist_ok=True)
                 path = self.screenshot_dir / "chrome_control.png"
                 page.screenshot(path=str(path))
+                # Try to extract image URLs for download hint
+                try:
+                    images = page.eval_on_selector_all(
+                        "img[src]",
+                        "els => els.slice(0, 10).map(e => e.src).filter(src => src.includes('oai') || src.includes('cdn') || src.includes('files.') || src.match(/\\.(png|jpg|jpeg|webp)/i))",
+                    )
+                    if images:
+                        return ToolResult.success(f"Screenshot → {path}\n[images: {', '.join(images[:3])}] Use file.download to save to data/downloads/images", screenshot=str(path), images=images)
+                except Exception:
+                    pass
                 return ToolResult.success(f"Screenshot → {path}", screenshot=str(path))
             return ToolResult.failure(f"Unknown action {action_l!r} — use open/click/type/press/wait/screenshot/move/type_system/scroll")
 

@@ -291,6 +291,8 @@ class VoiceSession:
         console: Optional[Console] = None,
         allow_voice_approval: bool = True,
         confidence_threshold: float = 0.6,
+        wake_word: Optional[str] = None,
+        wake_word_enabled: bool = True,
     ) -> None:
         self.app = app
         self.stt = stt
@@ -299,6 +301,12 @@ class VoiceSession:
         self.console = console or Console()
         self.allow_voice_approval = allow_voice_approval
         self.confidence_threshold = confidence_threshold
+        # Wake word — when enabled, only respond after hearing "hey arc"
+        voice_cfg = getattr(app.config, "voice", {}) or {}
+        self.wake_word = (wake_word or voice_cfg.get("wake_word", "hey arc") or "hey arc").lower().strip()
+        self.wake_word_enabled = bool(wake_word_enabled and voice_cfg.get("wake_word_enabled", True))
+        self._wake_active_until: float = 0.0
+        self._wake_timeout: float = 10.0  # seconds to stay awake after wake word
         self._queue: queue.Queue[Transcription] = queue.Queue()
         self._stop = threading.Event()
         self._listener_thread: Optional[threading.Thread] = None
@@ -330,11 +338,29 @@ class VoiceSession:
                 # ensure approver's guard stays current (for tests that swap guard)
                 self._approver.guard = guard_ref
 
+    def _contains_wake_word(self, text: str) -> bool:
+        if not self.wake_word_enabled or not self.wake_word:
+            return True  # no wake word required
+        t = (text or "").lower()
+        # Handle variations: "hey arc", "hey ark", "hi arc", "hey art"
+        return self.wake_word in t or "hey arc" in t or "hey ark" in t or "hi arc" in t
+
+    def _extract_after_wake(self, text: str) -> str:
+        if not self.wake_word_enabled:
+            return text
+        t_low = text.lower()
+        for phrase in (self.wake_word, "hey arc", "hey ark", "hi arc"):
+            idx = t_low.find(phrase)
+            if idx != -1:
+                after = text[idx + len(phrase):].strip(" ,.!?")
+                return after if after else text  # if just wake word, return original to keep awake
+        return text
+
     # ------------------------------------------------------------------ internals
 
     def _listener(self) -> None:
         """Background thread: always listening, pushes transcripts to queue."""
-        logger.info("Voice listener started (always listening, full duplex)")
+        logger.info("Voice listener started (always listening, full duplex, wake_word=%r enabled=%s)", self.wake_word, self.wake_word_enabled)
         while not self._stop.is_set():
             # Full duplex but with echo suppression: if TTS is speaking, we still
             # listen for barge-in, but we suppress obvious echo of our own voice.
@@ -364,6 +390,37 @@ class VoiceSession:
                 if is_echo(text, self._last_tts_text, last_time=self._last_tts_time):
                     logger.debug("Dropping echo transcript %r (last TTS %r)", text, self._last_tts_text[:40])
                     continue
+                # Wake word handling — when enabled, only wake on "hey arc"
+                if self.wake_word_enabled:
+                    now = time.time()
+                    has_wake = self._contains_wake_word(text)
+                    is_active = now < self._wake_active_until
+                    if has_wake:
+                        # Extract command after wake word
+                        cmd = self._extract_after_wake(text)
+                        # If just "hey arc" with no command, wake and wait for next utterance
+                        if cmd.lower().strip() in (self.wake_word, "hey arc", "hey ark", "hi arc") or not cmd.strip():
+                            self._wake_active_until = now + self._wake_timeout
+                            logger.info("Wake word detected: %r — listening for command (active for %.0fs)", text, self._wake_timeout)
+                            try:
+                                self.tts.speak("Yes?")
+                            except Exception:
+                                pass
+                            self.console.print("[dim]Wake word — listening…[/dim]")
+                            continue
+                        else:
+                            # Wake + command in same utterance
+                            self._wake_active_until = now + self._wake_timeout
+                            logger.info("Wake word + command: %r -> %r", text, cmd)
+                            tx.text = cmd
+                            text = cmd
+                    elif is_active:
+                        # Within wake window, treat as command
+                        logger.info("Wake active — Heard: %r (conf=%.2f)", text, tx.confidence)
+                    else:
+                        logger.debug("Ignoring (no wake word, not active): %r", text)
+                        self.console.print(f"[dim]Ignored (say 'hey arc' first): {text}[/dim]")
+                        continue
                 logger.info("Heard: %r (conf=%.2f)", text, tx.confidence)
                 self._queue.put(tx)
                 # If ARC is currently speaking, this will trigger barge-in in the main loop

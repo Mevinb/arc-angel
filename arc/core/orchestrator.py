@@ -56,6 +56,10 @@ def build_system_prompt(profile: Optional[Profile],
         "- Be concise. Use short paragraphs or bullet lists.",
         "- If denied permission for an action, explain what was blocked and ask the user "
         "how to proceed.",
+        "- For images: when user asks for one image (e.g. 'a girl in beach'), generate EXACTLY one, then stop. "
+        "After it succeeds, provide the image, offer to download to data/downloads/images, and ask if they want more. "
+        "Do not loop and make multiple images unless explicitly requested.",
+        "- After a successful image generation, download it with file.download to the arc download folder if possible.",
     ]
     if profile is not None and not profile.is_placeholder():
         parts.append("\n# User profile\n" + profile.summarize())

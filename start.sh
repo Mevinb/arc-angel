@@ -76,10 +76,14 @@ cleanup() {
     # Prevent re-entry
     trap - EXIT INT TERM HUP
 
-    # Stop OmniRoute if it was spawned by this script
-    if [[ "$STARTED_OMNIROUTE" -eq 1 ]]; then
-        stop_omniroute
-    fi
+    # Always kill OmniRoute on exit (user requested complete shutdown)
+    # Kill the PID we started, plus any other omniroute on this port
+    stop_omniroute
+    # Also kill any remaining omniroute processes (even if started before ./start.sh)
+    pkill -f "omniroute.*serve" 2>/dev/null || true
+    pkill -f "omniroute" 2>/dev/null || true
+    # Fallback: kill by port
+    fuser -k "${OMNIROUTE_PORT}/tcp" 2>/dev/null || true
 
     # Terminate any remaining background jobs started by this script
     local bg_pids
@@ -163,7 +167,7 @@ start_omniroute() {
 }
 
 # ---------------------------------------------------------------------------
-# Launch ARC
+# Launch ARC — always voice with wake word "hey arc"
 # ---------------------------------------------------------------------------
 launch_arc() {
     if [ ! -x "$ARC_BIN" ]; then
@@ -171,9 +175,16 @@ launch_arc() {
         echo "Activate the venv / install with:  pip install -e ." >&2
         return 1
     fi
-    # Pass all args except our --no-llm flag through to arc CLI.
-    # Note: Do not use exec so that bash stays alive to trap EXIT/INT/TERM
-    "$ARC_BIN" "$@"
+    # If no args, default to voice with wake word (always listening for "hey arc")
+    if [[ ${#ARGS[@]} -eq 0 ]]; then
+        echo "Starting ARC voice — say 'hey arc' to wake (always listening)..."
+        # Pass through to arc voice (wake word handled in VoiceSession)
+        "$ARC_BIN" voice
+    else
+        # Pass all args except our --no-llm flag through to arc CLI.
+        # Note: Do not use exec so that bash stays alive to trap EXIT/INT/TERM
+        "$ARC_BIN" "${ARGS[@]}"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -184,12 +195,18 @@ for arg in "$@"; do
     [[ "$arg" == "--no-llm" ]] || ARGS+=("$arg")
 done
 
+# Handle explicit voice/chat subcommands — normalize to voice with wake word if needed
+# e.g., ./start.sh -> voice, ./start.sh chat -> chat, ./start.sh voice -> voice
+
 if [[ "$SKIP_LLM" -eq 1 ]]; then
     echo "Skipping OmniRoute (--no-llm)."
 else
     start_omniroute
 fi
 
+# Ensure download folder exists for generated images
+mkdir -p "$PROJECT_DIR/data/downloads/images" 2>/dev/null || true
+
 ARC_EXIT=0
-launch_arc "${ARGS[@]}" || ARC_EXIT=$?
+launch_arc || ARC_EXIT=$?
 exit "$ARC_EXIT"

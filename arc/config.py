@@ -68,6 +68,8 @@ DEFAULTS: Dict[str, Any] = {
         "allow_voice_approval": True,
         "vad_aggressiveness": 3,
         "confidence_threshold": 0.6,
+        "wake_word": "hey arc",
+        "wake_word_enabled": True,
     },
     "browser": {
         "user_data_dir": "~/.config/google-chrome",

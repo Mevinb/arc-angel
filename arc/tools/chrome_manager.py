@@ -276,6 +276,13 @@ class ChromeManager:
     def _thread_init_playwright(self) -> None:
         if self._pw is not None:
             return
+        # Isolate Playwright's greenlet/event-loop from main thread's asyncio (voice/omni)
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        except Exception:
+            pass
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
 

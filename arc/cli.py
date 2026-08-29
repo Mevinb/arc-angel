@@ -443,6 +443,8 @@ def _cmd_voice(app: ArcApp, args: argparse.Namespace) -> int:
         console=console,
         allow_voice_approval=allow_voice_approval,
         confidence_threshold=float(voice_cfg.get("confidence_threshold", 0.6)),
+        wake_word=voice_cfg.get("wake_word", "hey arc"),
+        wake_word_enabled=bool(voice_cfg.get("wake_word_enabled", True)),
     )
     return 0 if session.run_forever() is None else 0  # run_forever handles its own exit
 

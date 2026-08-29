@@ -79,12 +79,15 @@ class ShellTool(Tool):
         if classify_command(command) == RiskLevel.RED:
             return ToolResult.failure(f"{BLOCKED_HINT} Refused: `{command}`")
 
+        # Detect binary-targeting commands (cat *.png, head on images) to avoid UnicodeDecodeError
+        is_binary_cmd = any(ext in command for ext in (".png", ".jpg", ".jpeg", ".webp", ".pdf", ".zip")) and "cat" in command
+
         try:
             completed = subprocess.run(
                 command,
                 shell=True,
                 capture_output=True,
-                text=True,
+                text=not is_binary_cmd,
                 timeout=max(5, min(int(timeout_seconds), 600)),
                 cwd=str(self.workdir),
             )
@@ -92,6 +95,28 @@ class ShellTool(Tool):
             return ToolResult.failure(f"Command timed out after {timeout_seconds}s: {command}")
         except OSError as exc:
             return ToolResult.failure(f"Failed to execute: {exc}")
+
+        if is_binary_cmd:
+            # Return binary-safe preview, don't decode as utf-8
+            stdout_b = completed.stdout or b""
+            stderr_b = completed.stderr or b""
+            # Provide file info instead of raw bytes
+            try:
+                stdout_preview = stdout_b[:200].hex() if stdout_b else ""
+                stderr_preview = stderr_b.decode(errors="replace").strip() if stderr_b else ""
+            except Exception:
+                stdout_preview = "<binary>"
+                stderr_preview = ""
+            if b"\x89PNG" in stdout_b[:10]:
+                output = f"[binary PNG {len(stdout_b)} bytes, hex preview {stdout_preview[:100]}...] Use file tools or browser.download for images."
+            else:
+                output = f"[binary {len(stdout_b)} bytes] {stdout_preview[:500]}"
+            if stderr_preview:
+                output = f"{output}\n[stderr]\n{stderr_preview}" if output else stderr_preview
+            return ToolResult.success(
+                output=output[:8000] or "(no output)",
+                exit_code=completed.returncode,
+            )
 
         stdout = (completed.stdout or "").strip()
         stderr = (completed.stderr or "").strip()
@@ -226,11 +251,12 @@ class ChromeVisibleTool(Tool):
         try:
             from .chrome_manager import ChromeManager
 
-            page = ChromeManager.instance().ensure_visible(url)
-            # Pull title/url on the manager thread for a useful response
+            mgr = ChromeManager.instance()
+            mgr.ensure_visible(url)
+            # Pull title/url on the manager thread (avoid greenlet switch error)
             try:
-                title = page.title()
-                cur = page.url
+                title = mgr.title()
+                cur = mgr.url()
             except Exception:
                 title, cur = "", url
             return ToolResult.success(

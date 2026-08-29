@@ -25,6 +25,7 @@ from .skills.tools import register_skills_tools
 from .tools.base import ToolRegistry
 from .tools.browser import register_browser_tools
 from .tools.computer import register_computer_tools
+from .tools.download import DownloadTool
 from .tools.email_engine import GmailEngine, GmailTools, register_email_tools
 from .tools.personal import register_personal_tools
 
@@ -118,6 +119,7 @@ class ArcApp:
                                screenshot_dir=self.config.data_dir / "screenshots")
         register_computer_tools(self.registry,
                                 workdir=Path.cwd())
+        self.registry.register(DownloadTool(download_dir=self.config.data_dir / "downloads"))
         register_email_tools(self.registry, self.gmail_engine, self.gmail_tools)
         register_internship_tools(self.registry, self.internships)
         # Register skill tools only when the library actually has content, so an
