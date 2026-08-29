@@ -397,6 +397,14 @@ class ChromeControlTool(Tool):
     def __init__(self, screenshot_dir: Optional[Path] = None) -> None:
         self.screenshot_dir = screenshot_dir or Path("data/screenshots")
 
+    def availability(self) -> str:
+        try:
+            from .wayland_input import availability as _wa
+
+            return f"playwright available; {_wa()}"
+        except Exception:
+            return "playwright available"
+
     def run(self, action: str = "", target: str = "", value: str = "", **_: Any) -> ToolResult:
         from .chrome_manager import ChromeManager
 
@@ -434,8 +442,15 @@ class ChromeControlTool(Tool):
                 button = parts[2].strip() if len(parts) > 2 else "left"
                 ok, msg = _move_click(x, y, button)
                 if ok:
-                    return ToolResult.success(msg)
-                return ToolResult.failure(msg)
+                    return ToolResult.success(msg + " (OS cursor)")
+                # Fallback: browser synthetic mouse (visible in-page, not OS, but proves ChromeControl works)
+                try:
+                    mgr.do(lambda p: (p.mouse.move(x, y), p.mouse.click(x, y))[1])
+                    return ToolResult.success(
+                        f"Moved to ({x},{y}) and clicked {button} via browser fallback (ydotool not available: {msg}). Install ydotool for OS cursor."
+                    )
+                except Exception:
+                    return ToolResult.failure(msg)
             except Exception as exc:
                 return ToolResult.failure(f"move failed: {exc}")
 
@@ -478,12 +493,20 @@ class ChromeControlTool(Tool):
 
         def _do_action(page) -> ToolResult:  # runs on manager thread
             if action_l == "click":
-                # Support "selector" or "x,y"
+                # Support "selector" or "x,y" — for x,y also warp OS cursor when possible (dual)
                 if "," in tgt and tgt.replace(",", "").replace(" ", "").isdigit():
                     x_str, y_str = [s.strip() for s in tgt.split(",")][:2]
-                    page.mouse.click(int(x_str), int(y_str))
+                    x_i, y_i = int(x_str), int(y_str)
+                    # Best-effort OS warp (don't fail if missing)
+                    try:
+                        from .wayland_input import move_click as _mc
+
+                        _mc(x_i, y_i, "left")
+                    except Exception:
+                        pass
+                    page.mouse.click(x_i, y_i)
                     page.wait_for_timeout(800)
-                    return ToolResult.success(f"Clicked at {tgt!r} — {page.url[:80]}")
+                    return ToolResult.success(f"Clicked at {tgt!r} — {page.url[:80]} (browser + OS best-effort)")
                 page.click(tgt, timeout=10000)
                 page.wait_for_timeout(800)
                 return ToolResult.success(f"Clicked {tgt!r} — {page.url[:80]}")

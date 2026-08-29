@@ -26,16 +26,36 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("arc.chrome_manager")
 
 _CDPPort = 9222
-_DISPLAY = os.environ.get("DISPLAY", ":1")
-_WAYLAND = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+_DISPLAY = os.environ.get("DISPLAY") or ":1"
+_WAYLAND = os.environ.get("WAYLAND_DISPLAY") or "wayland-0"
 
 
 def _env() -> Dict[str, str]:
     env = os.environ.copy()
+    # Don't override user's real session — only fill if missing
     env.setdefault("DISPLAY", _DISPLAY)
     env.setdefault("WAYLAND_DISPLAY", _WAYLAND)
-    env.setdefault("XDG_SESSION_TYPE", "wayland")
+    # Only force wayland if caller explicitly in wayland session; otherwise preserve
+    if "XDG_SESSION_TYPE" not in env:
+        env["XDG_SESSION_TYPE"] = os.environ.get("XDG_SESSION_TYPE", "wayland")
     return env
+
+
+def _has_existing_chrome_process() -> bool:
+    """True if any google-chrome/chromium process is running (no CDP needed)."""
+    try:
+        result = subprocess.run(["pgrep", "-a", "chrome"], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0 and "chrome" in result.stdout.lower():
+            return True
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(["pgrep", "-a", "chromium"], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0 and result.stdout.strip():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 class ChromeManager:
@@ -59,6 +79,7 @@ class ChromeManager:
         self._context: Any = None
         self._last_url: str = ""
         self._cdp_url = f"http://127.0.0.1:{_CDPPort}"
+        self._daemon_proc: Optional[subprocess.Popen] = None  # track CDP daemon
         # Serialize ensure_visible calls
         self._op_lock = threading.Lock()
 
@@ -96,36 +117,56 @@ class ChromeManager:
             except Exception as exc:
                 logger.debug("CDP connect failed: %s", exc)
 
-        # 2) Ensure a debuggable Chrome daemon is running (once, no profile copy)
+        # 2) Ensure a debuggable Chrome daemon is running (once, track proc)
         if not self._is_cdp_alive():
-            try:
-                subprocess.Popen(
-                    [
-                        "google-chrome",
-                        f"--remote-debugging-port={_CDPPort}",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                        "--ozone-platform-hint=auto",
-                        "about:blank",
-                    ],
-                    env=_env(),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                # Wait for CDP
-                for _ in range(20):
+            # Don't spam daemon if one was already launched and is still running
+            if self._daemon_proc is not None and self._daemon_proc.poll() is None:
+                for _ in range(10):
                     if self._is_cdp_alive():
                         break
                     time.sleep(0.2)
                 if self._is_cdp_alive():
-                    browser = self._pw.chromium.connect_over_cdp(self._cdp_url)
-                    ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                    self._browser, self._context, self._page = browser, ctx, page
-                    logger.debug("ChromeManager: launched CDP daemon and connected")
-                    return page
-            except Exception as exc:
-                logger.debug("CDP daemon launch failed: %s", exc)
+                    try:
+                        browser = self._pw.chromium.connect_over_cdp(self._cdp_url)
+                        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+                        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                        self._browser, self._context, self._page = browser, ctx, page
+                        logger.debug("ChromeManager: reused CDP daemon and connected")
+                        return page
+                    except Exception as exc:
+                        logger.debug("CDP reuse connect failed: %s", exc)
+            # Only launch if no existing Chrome AND no daemon — otherwise existing Chrome (no CDP) is handled by fallback navigation
+            if _has_existing_chrome_process():
+                logger.debug("ChromeManager: existing Chrome without CDP — will use fallback visible channel instead of daemon spam")
+            else:
+                try:
+                    self._daemon_proc = subprocess.Popen(
+                        [
+                            "google-chrome",
+                            f"--remote-debugging-port={_CDPPort}",
+                            "--no-first-run",
+                            "--no-default-browser-check",
+                            "--ozone-platform-hint=auto",
+                            "about:blank",
+                        ],
+                        env=_env(),
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    # Wait for CDP
+                    for _ in range(20):
+                        if self._is_cdp_alive():
+                            break
+                        time.sleep(0.2)
+                    if self._is_cdp_alive():
+                        browser = self._pw.chromium.connect_over_cdp(self._cdp_url)
+                        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+                        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                        self._browser, self._context, self._page = browser, ctx, page
+                        logger.debug("ChromeManager: launched CDP daemon and connected")
+                        return page
+                except Exception as exc:
+                    logger.debug("CDP daemon launch failed: %s", exc)
 
         # 3) Fallback: launch visible Chrome via Playwright using system channel
         # (last resort — still visible, but isolated). We keep browser open.
@@ -204,10 +245,8 @@ class ChromeManager:
         if url and not url.startswith(("http://", "https://")):
             url = "https://" + url
         with self._op_lock:
-            # Also try OS-level pop via google-chrome --new-window only if we have
-            # no live page AND CDP not alive (i.e., Chrome not running at all).
-            # Otherwise rely on CDP navigation to avoid window spam.
-            if not self._is_cdp_alive() and self._page is None and url:
+            # Bootstrap only if NO chrome at all (neither CDP nor normal process) and no live page
+            if not self._is_cdp_alive() and self._page is None and url and not _has_existing_chrome_process():
                 try:
                     # One-shot OS pop to bootstrap Chrome if nothing running
                     subprocess.Popen(
