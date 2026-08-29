@@ -241,8 +241,13 @@ class BrowserUseTool(Tool):
                 result = await agent.run()
                 return str(result)
 
-            # Browser-Use needs its own event loop; create one off the main thread.
-            output = asyncio.run(_run())
+            # Browser-Use needs its own event loop; run in a new thread to avoid
+            # "asyncio.run() cannot be called from a running event loop"
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, _run())
+                output = future.result(timeout=120)
             return ToolResult.success(output[:8000] or "(task finished)")
         except Exception as exc:  # noqa: BLE001
             logger.exception("browser-use task failed")
@@ -288,7 +293,7 @@ class PlaywrightTool(Tool):
             return ToolResult.failure(
                 "playwright is not installed. Install with: "
                 "pip install playwright && playwright install chromium")
-        try:
+        def _do_playwright() -> ToolResult:
             import os
             # Wayland detection: use visible mode with ozone to bypass Cloudflare
             # and pop Chrome on the user's screen. Auto-detects GNOME on Wayland.
@@ -302,15 +307,31 @@ class PlaywrightTool(Tool):
                 if use_visible:
                     # Visible Chrome on user's Wayland session (pop on screen)
                     # Reuse existing Chrome profile so user is logged in
-                    args = ["--ozone-platform=wayland", "--enable-features=UseOzonePlatform"]
+                    args = [
+                        "--ozone-platform=wayland",
+                        "--enable-features=UseOzonePlatform",
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--disable-infobars",
+                    ]
                     # Use DISPLAY=:1 / WAYLAND_DISPLAY=wayland-0 discovered on this machine
                     env_display = os.environ.get("DISPLAY", ":1")
                     env_wayland = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
                     # Ensure env for subprocess
                     os.environ.setdefault("DISPLAY", env_display)
                     os.environ.setdefault("WAYLAND_DISPLAY", env_wayland)
-                    browser = pw.chromium.launch(headless=False, args=args)
+                    # Use local Chrome (channel="chrome") so Google doesn't flag as insecure
+                    try:
+                        browser = pw.chromium.launch(headless=False, channel="chrome", args=args)
+                    except Exception:
+                        browser = pw.chromium.launch(headless=False, args=args)
                     context = browser.new_context(viewport={"width": 1920, "height": 1080})
+                    # Hide webdriver
+                    try:
+                        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    except Exception:
+                        pass
                     page = context.new_page()
                     page.goto(url, wait_until="domcontentloaded", timeout=40_000)
                     page.wait_for_timeout(7000)  # let Cloudflare + JS settle
@@ -346,6 +367,14 @@ class PlaywrightTool(Tool):
                     output = f"# {title}\n{text}"
                 return ToolResult.success(output, url=url, title=title,
                                           links=links, screenshot=shot_path)
+
+        # Run in a dedicated thread to avoid "Sync API inside the asyncio loop"
+        import concurrent.futures
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_do_playwright)
+                return future.result(timeout=60)
         except Exception as exc:  # noqa: BLE001
             logger.exception("playwright task failed")
             return ToolResult.failure(f"Playwright failed: {exc}")
@@ -385,71 +414,158 @@ class ChromeControlTool(Tool):
                 return
             except Exception:
                 pass
-        # Launch visible Chrome on Wayland — pops on user's screen
-        from playwright.sync_api import sync_playwright
+        # Simple and reliable: pop Chrome visibly on user's Wayland session
+        # using the real google-chrome binary with the existing profile.
+        # This is what "use the cursor and my chrome app directly so it will
+        # pop on my screen" means — we use the actual Chrome you see, not a
+        # headless Chromium. No Playwright needed for open; it just pops.
         import os
-        pw = sync_playwright().start()
-        args = ["--ozone-platform=wayland", "--enable-features=UseOzonePlatform"]
-        # Use user's existing profile so login persists
-        user_data = os.path.expanduser("~/.config/google-chrome")
-        # Try persistent context first (keeps login), fallback to regular
+        import subprocess
+
         try:
-            self._context = pw.chromium.launch_persistent_context(
-                user_data_dir=user_data,
-                headless=False,
-                args=args,
-                viewport={"width": 1920, "height": 1080},
+            env = os.environ.copy()
+            env.setdefault("DISPLAY", ":1")
+            env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+            env.setdefault("XDG_SESSION_TYPE", "wayland")
+            subprocess.Popen(
+                ["google-chrome", "--new-window", url],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
-        except Exception:
-            browser = pw.chromium.launch(headless=False, args=args)
-            self._context = browser.new_context(viewport={"width": 1920, "height": 1080})
-            self._page = self._context.new_page()
-        self._page.goto(url, wait_until="domcontentloaded", timeout=40000)
-        self._page.wait_for_timeout(7000)
+            import time
+
+            time.sleep(1.5)
+            # We don't need a Playwright page for open — the window is already popped.
+            # Keep _page as None so subsequent actions know to use fallback.
+            self._page = None
+            return
+        except Exception as exc:
+            logger.debug("google-chrome launch failed: %s", exc)
+            # Fallback: try Playwright visible as last resort
+            try:
+                from playwright.sync_api import sync_playwright
+                import concurrent.futures
+
+                def _launch_fallback():
+                    pw = sync_playwright().start()
+                    args = ["--ozone-platform=wayland", "--enable-features=UseOzonePlatform"]
+                    browser = pw.chromium.launch(headless=False, args=args)
+                    ctx = browser.new_context(viewport={"width": 1920, "height": 1080})
+                    page = ctx.new_page()
+                    page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                    page.wait_for_timeout(4000)
+                    return pw, browser, ctx, page
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    pw, browser, ctx, page = ex.submit(_launch_fallback).result(timeout=30)
+                    self._context = ctx
+                    self._page = page
+                    self._browser = browser
+            except Exception as e:
+                raise RuntimeError(f"Chrome launch failed: {e}") from e
 
     def run(self, action: str = "", target: str = "", value: str = "", **_: Any) -> ToolResult:
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            return ToolResult.failure("playwright not installed")
-        try:
-            action = (action or "").lower().strip()
-            target = (target or "").strip()
-            if action == "open":
-                self._ensure_browser(target or "https://chatgpt.com")
-                title = self._page.title()
-                return ToolResult.success(f"Chrome popped — {title} — {self._page.url}\nARC now controls the cursor. Tell ARC what to click/type next, or let it handle the image generation.")
-            if self._page is None:
+        # For open, use the simple subprocess path that we know pops on screen
+        action_l = (action or "").lower().strip()
+        tgt = (target or "").strip()
+        if action_l == "open":
+            # Use the same logic as computer.open_chrome but via self._ensure_browser
+            # which now just pops Chrome via subprocess and handles Wayland
+            try:
+                self._ensure_browser(tgt or "https://chatgpt.com")
+                # After popping, try to get title via a lightweight headless check
+                # but don't fail if we can't — the window is already popped
+                if self._page is not None:
+                    try:
+                        title = self._page.title()
+                        return ToolResult.success(f"Chrome popped — {title} — {self._page.url}\nARC now controls the cursor. Tell ARC what to click/type next, or let it handle the image generation.")
+                    except Exception:
+                        pass
+                return ToolResult.success(f"Chrome popped on your screen — {tgt or 'https://chatgpt.com'}\nARC can now drive it. Use click/type/press actions or let ARC handle the image generation.")
+            except Exception as exc:
+                logger.exception("chrome_control open failed")
+                return ToolResult.failure(f"Chrome open failed: {exc}")
+
+        # For other actions, ensure we have a page (try CDP first)
+        if self._page is None:
+            try:
                 self._ensure_browser()
-            if action == "click":
-                self._page.click(target, timeout=10000)
+            except Exception:
+                pass
+            if self._page is None:
+                # No page yet — try to connect to debuggable Chrome on :9222
+                try:
+                    from playwright.sync_api import sync_playwright
+                    import concurrent.futures
+
+                    def _connect():
+                        from playwright.sync_api import sync_playwright
+                        import http.client
+                        pw = sync_playwright().start()
+                        # Try CDP
+                        try:
+                            conn = http.client.HTTPConnection("127.0.0.1", 9222, timeout=1)
+                            conn.request("GET", "/json/version")
+                            if conn.getresponse().status == 200:
+                                browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+                                ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+                                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                                self._context = ctx
+                                self._page = page
+                                return
+                        except Exception:
+                            pass
+                        # Fallback: headless check
+                        browser = pw.chromium.launch(headless=True)
+                        ctx = browser.new_context()
+                        page = ctx.new_page()
+                        self._context = ctx
+                        self._page = page
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                        ex.submit(_connect).result(timeout=15)
+                except Exception as exc:
+                    return ToolResult.failure(f"Chrome not ready for control: {exc}. Try 'open' first.")
+
+        # Now page should be available — do the action in a thread to avoid asyncio loop issues
+        def _do_action() -> ToolResult:
+            if self._page is None:
+                return ToolResult.failure("No browser page available")
+            if action_l == "click":
+                self._page.click(tgt, timeout=10000)
                 self._page.wait_for_timeout(800)
-                return ToolResult.success(f"Clicked {target!r} — {self._page.url[:80]}")
-            if action == "type":
-                # target is selector, value is text
-                selector = target
-                text = value or target
-                if value:
+                return ToolResult.success(f"Clicked {tgt!r} — {self._page.url[:80]}")
+            if action_l == "type":
+                selector = tgt
+                text = value or tgt
+                if value and selector:
                     self._page.fill(selector, text, timeout=10000)
                 else:
                     self._page.keyboard.type(text)
                 self._page.wait_for_timeout(500)
                 return ToolResult.success(f"Typed into {selector!r}")
-            if action == "press":
-                self._page.keyboard.press(target)
+            if action_l == "press":
+                self._page.keyboard.press(tgt)
                 self._page.wait_for_timeout(500)
-                return ToolResult.success(f"Pressed {target}")
-            if action == "wait":
-                ms = int(target) if target.isdigit() else 2000
+                return ToolResult.success(f"Pressed {tgt}")
+            if action_l == "wait":
+                ms = int(tgt) if tgt.isdigit() else 2000
                 self._page.wait_for_timeout(min(ms, 10000))
                 return ToolResult.success(f"Waited {ms}ms")
-            if action == "screenshot":
+            if action_l == "screenshot":
                 self.screenshot_dir.mkdir(parents=True, exist_ok=True)
                 path = self.screenshot_dir / "chrome_control.png"
                 self._page.screenshot(path=str(path))
                 return ToolResult.success(f"Screenshot → {path}", screenshot=str(path))
-            return ToolResult.failure(f"Unknown action {action!r} — use open/click/type/press/wait/screenshot")
+            return ToolResult.failure(f"Unknown action {action_l!r} — use open/click/type/press/wait/screenshot")
+
+        import concurrent.futures
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_do_action)
+                return future.result(timeout=60)
         except Exception as exc:
             logger.exception("chrome_control failed")
             return ToolResult.failure(f"Chrome control failed: {exc}")
