@@ -301,12 +301,13 @@ class VoiceSession:
         self.console = console or Console()
         self.allow_voice_approval = allow_voice_approval
         self.confidence_threshold = confidence_threshold
-        # Wake word — when enabled, only respond after hearing "hey" (or "hey arc")
+        # Wake word — when enabled, only respond after hearing "hey" (persists till session end)
         voice_cfg = getattr(app.config, "voice", {}) or {}
         self.wake_word = (wake_word or voice_cfg.get("wake_word", "hey") or "hey").lower().strip()
         self.wake_word_enabled = bool(wake_word_enabled and voice_cfg.get("wake_word_enabled", True))
         self._wake_active_until: float = 0.0
-        self._wake_timeout: float = 12.0  # seconds to stay awake after wake word
+        self._wake_timeout: float = float("inf")  # persist till session end once woken
+        self._wake_ever_triggered: bool = False
         self._typed_thread: Optional[threading.Thread] = None
         self._queue: queue.Queue[Transcription] = queue.Queue()
         self._stop = threading.Event()
@@ -397,36 +398,39 @@ class VoiceSession:
                 if is_echo(text, self._last_tts_text, last_time=self._last_tts_time):
                     logger.debug("Dropping echo transcript %r (last TTS %r)", text, self._last_tts_text[:40])
                     continue
-                # Wake word handling — when enabled, only wake on "hey arc"
+                # Wake word handling — once "hey" heard, stay awake till session end
                 if self.wake_word_enabled:
                     now = time.time()
                     has_wake = self._contains_wake_word(text)
-                    is_active = now < self._wake_active_until
+                    # Once woken, stay awake forever (persist till session end)
+                    is_active = self._wake_ever_triggered or (now < self._wake_active_until)
                     if has_wake:
+                        self._wake_ever_triggered = True
                         # Extract command after wake word
                         cmd = self._extract_after_wake(text)
-                        # If just "hey arc" with no command, wake and wait for next utterance
-                        if cmd.lower().strip() in (self.wake_word, "hey arc", "hey ark", "hi arc") or not cmd.strip():
-                            self._wake_active_until = now + self._wake_timeout
-                            logger.info("Wake word detected: %r — listening for command (active for %.0fs)", text, self._wake_timeout)
+                        # If just "hey" with no command, wake and wait for next utterance
+                        if not cmd.strip():
+                            self._wake_active_until = float("inf")
+                            logger.info("Wake word detected: %r — now awake till session end", text)
                             try:
                                 self.tts.speak("Yes?")
                             except Exception:
                                 pass
-                            self.console.print("[dim]Wake word — listening…[/dim]")
+                            self.console.print("[dim]Wake word — now awake till you say exit[/dim]")
                             continue
                         else:
                             # Wake + command in same utterance
-                            self._wake_active_until = now + self._wake_timeout
-                            logger.info("Wake word + command: %r -> %r", text, cmd)
+                            self._wake_active_until = float("inf")
+                            self._wake_ever_triggered = True
+                            logger.info("Wake word + command: %r -> %r (persisting awake)", text, cmd)
                             tx.text = cmd
                             text = cmd
                     elif is_active:
-                        # Within wake window, treat as command
-                        logger.info("Wake active — Heard: %r (conf=%.2f)", text, tx.confidence)
+                        # Already woken — treat as command (no need to say hey again)
+                        logger.info("Wake active (persisted) — Heard: %r (conf=%.2f)", text, tx.confidence)
                     else:
-                        logger.debug("Ignoring (no wake word, not active): %r", text)
-                        self.console.print(f"[dim]Ignored (say 'hey arc' first): {text}[/dim]")
+                        logger.debug("Ignoring (no wake word, not yet woken): %r", text)
+                        self.console.print(f"[dim]Ignored (say 'hey' first): {text}[/dim]")
                         continue
                 logger.info("Heard: %r (conf=%.2f)", text, tx.confidence)
                 self._queue.put(tx)
@@ -630,7 +634,7 @@ class VoiceSession:
         self._typed_thread.start()
 
         self.console.print("[dim]Listening… (full duplex — you can interrupt me anytime)[/dim]")
-        self.console.print("[dim]Voice: say [cyan]hey[/cyan] to wake — e.g. 'hey generate a girl in beach'[/dim]")
+        self.console.print("[dim]Voice: say [cyan]hey[/cyan] once to wake — stays awake till you say exit[/dim]")
         self.console.print("[dim]Type: just type your message and press Enter — you don't need to say hey[/dim]")
 
         try:

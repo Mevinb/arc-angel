@@ -17,6 +17,14 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+# Ensure CUDA libs from venv (nvidia-cublas-cu12) are found for faster-whisper
+if [[ -d "$PROJECT_DIR/.venv/lib/python3.12/site-packages/nvidia/cublas/lib" ]]; then
+    export LD_LIBRARY_PATH="$PROJECT_DIR/.venv/lib/python3.12/site-packages/nvidia/cublas/lib:$PROJECT_DIR/.venv/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:$PROJECT_DIR/.venv/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:${LD_LIBRARY_PATH:-}"
+fi
+if [[ -d "$PROJECT_DIR/.venv/lib/python3.11/site-packages/nvidia/cublas/lib" ]]; then
+    export LD_LIBRARY_PATH="$PROJECT_DIR/.venv/lib/python3.11/site-packages/nvidia/cublas/lib:$PROJECT_DIR/.venv/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:${LD_LIBRARY_PATH:-}"
+fi
+
 # Locate the omniroute binary: $OMNIROUTE_BIN > PATH > nvm install dir.
 if [[ -z "${OMNIROUTE_BIN:-}" ]]; then
     OMNIROUTE_BIN="$(command -v omniroute || true)"
@@ -167,7 +175,7 @@ start_omniroute() {
 }
 
 # ---------------------------------------------------------------------------
-# Launch ARC — always voice with wake word "hey arc"
+# Launch ARC — always voice with wake word "hey" (persists till exit)
 # ---------------------------------------------------------------------------
 launch_arc() {
     if [ ! -x "$ARC_BIN" ]; then
@@ -175,12 +183,12 @@ launch_arc() {
         echo "Activate the venv / install with:  pip install -e ." >&2
         return 1
     fi
-    # If no args, default to voice with wake word (always listening for "hey arc")
+    # If no args, default to voice with wake word (always listening for "hey", stays awake till exit)
     if [[ ${#ARGS[@]} -eq 0 ]]; then
-        echo "Starting ARC voice — say 'hey arc' to wake (always listening)..."
-        # Pass through to arc voice (wake word handled in VoiceSession)
+        echo "Starting ARC voice — say 'hey' once to wake (stays awake till you exit)..."
+        # Pass through to arc voice (wake word handled in VoiceSession, persists)
         "$ARC_BIN" voice
-    else
+    else:
         # Pass all args except our --no-llm flag through to arc CLI.
         # Note: Do not use exec so that bash stays alive to trap EXIT/INT/TERM
         "$ARC_BIN" "${ARGS[@]}"
