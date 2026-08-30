@@ -173,23 +173,50 @@ class Pyttsx3TTS(TTSProvider):
 class PiperTTS(TTSProvider):
     """Piper TTS — local, CPU, <100MB. Preferred over pyttsx3 when installed.
 
-    Requires `pip install piper-tts` and a voice model downloaded to
-    `~/.local/share/piper/voices/`. Falls back to Pyttsx3TTS if not available.
+    Requires `pip install piper-tts` and a voice model. Falls back to Pyttsx3TTS if not available.
     """
 
     def __init__(self, voice: str = "en_US-amy-medium", model_path: str | None = None) -> None:
         self.voice = voice
         self.model_path = model_path
         self._piper = None
+        self._voice = None
         self._fallback: Optional[Pyttsx3TTS] = None
         self._speaking = False
         self._stop_flag = threading.Event()
+        self._lock = threading.Lock()
         try:
             import piper  # type: ignore
             self._piper = piper
-            # Lazy load model on first speak to avoid startup latency
-            self._model = None
-            logger.info("piper TTS available (voice=%s)", voice)
+            # Try to load voice model immediately
+            try:
+                from pathlib import Path
+                # Search common locations
+                candidates = []
+                if model_path:
+                    candidates.append(Path(model_path))
+                # Current dir (where download_voices puts it)
+                candidates.append(Path(f"{voice}.onnx"))
+                candidates.append(Path.cwd() / f"{voice}.onnx")
+                # Home piper dir
+                candidates.append(Path.home() / ".local/share/piper/voices" / voice / f"{voice}.onnx")
+                candidates.append(Path.home() / f".local/share/piper/{voice}.onnx")
+                # Data dir
+                candidates.append(Path("data/piper") / f"{voice}.onnx")
+                model_file = None
+                for p in candidates:
+                    if p.is_file():
+                        model_file = p
+                        break
+                if model_file:
+                    self._voice = piper.PiperVoice.load(str(model_file))
+                    logger.info("piper TTS ready (voice=%s, model=%s)", voice, model_file)
+                else:
+                    logger.info("piper voice %s not found — will use pyttsx3 until downloaded (python -m piper.download_voices %s)", voice, voice)
+                    self._fallback = Pyttsx3TTS()
+            except Exception as exc:
+                logger.warning("piper voice load failed: %s — fallback to pyttsx3", exc)
+                self._fallback = Pyttsx3TTS()
         except ImportError:
             logger.info("piper-tts not installed — will use pyttsx3 (pip install piper-tts)")
             self._piper = None
@@ -197,11 +224,59 @@ class PiperTTS(TTSProvider):
 
     @property
     def available(self) -> bool:
-        return self._piper is not None or (self._fallback is not None and self._fallback.available)
+        return (self._voice is not None) or (self._piper is not None) or (self._fallback is not None and self._fallback.available)
 
     def speak(self, text: str) -> None:
         text = Pyttsx3TTS._clean(text)
         if not text:
+            return
+        if self._voice is not None and self._piper is not None:
+            with self._lock:
+                self._speaking = True
+                self._stop_flag.clear()
+            try:
+                import sounddevice as sd
+                import numpy as np
+
+                # Piper synthesizes to AudioChunk(s) with audio_float_array
+                audio_chunks = []
+                for chunk in self._voice.synthesize(text):
+                    if self._stop_flag.is_set():
+                        break
+                    # AudioChunk has audio_float_array (numpy) and sample_rate
+                    arr = getattr(chunk, "audio_float_array", None)
+                    if arr is not None:
+                        audio_chunks.append(arr)
+                    elif hasattr(chunk, "audio_int16_bytes"):
+                        # Fallback for older API
+                        import numpy as np
+                        audio_chunks.append(np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16).astype(np.float32) / 32768.0)
+
+                if self._stop_flag.is_set() or not audio_chunks:
+                    return
+                audio = np.concatenate(audio_chunks) if len(audio_chunks) > 1 else audio_chunks[0]
+                samplerate = getattr(self._voice, "config", {}).sample_rate if hasattr(self._voice.config, "sample_rate") else 22050
+                try:
+                    samplerate = int(samplerate)
+                except Exception:
+                    samplerate = 22050
+
+                if self._stop_flag.is_set():
+                    return
+                sd.play(audio, samplerate=samplerate)
+                while sd.get_stream().active and not self._stop_flag.is_set():
+                    sd.sleep(50)
+                if self._stop_flag.is_set():
+                    sd.stop()
+            except Exception as exc:
+                logger.warning("piper speak failed: %s — fallback", exc)
+                if self._fallback:
+                    self._fallback.speak(text)
+                else:
+                    print(f"[tts] {text}", flush=True)
+            finally:
+                with self._lock:
+                    self._speaking = False
             return
         if self._piper is None:
             if self._fallback:
@@ -209,10 +284,7 @@ class PiperTTS(TTSProvider):
             else:
                 print(f"[tts] {text}", flush=True)
             return
-        # TODO: actual piper synthesis when model is present
-        # For now, until voice model is downloaded, delegate to fallback so
-        # the system is not broken on first run.
-        # Download via: `python -m piper.download_voices en_US-amy-medium`
+        # piper installed but voice not loaded — fallback
         if self._fallback:
             self._fallback.speak(text)
         else:
@@ -220,14 +292,24 @@ class PiperTTS(TTSProvider):
 
     def stop(self) -> None:
         self._stop_flag.set()
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception:
+            pass
         if self._fallback:
             self._fallback.stop()
+        with self._lock:
+            self._speaking = False
 
     @property
     def is_speaking(self) -> bool:
+        with self._lock:
+            if self._speaking:
+                return True
         if self._fallback:
             return self._fallback.is_speaking
-        return self._speaking
+        return False
 
 
 # ------------------------------------------------------------------ Kokoro (neural, ~2GB VRAM, best quality)
@@ -391,8 +473,23 @@ def make_tts(kind: str = "auto", voice: str | None = None, device: str = "auto")
     if kind == "pyttsx3":
         return Pyttsx3TTS(voice=voice)
 
-    # auto: try kokoro first if we have RAM
+    # auto: try kokoro first if we have RAM, but prefer piper when VRAM tight (llama running)
     if kind == "auto":
+        # If VRAM low (<3GB free), piper (100MB CPU) is safer than kokoro (2GB)
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                try:
+                    free, _ = torch.cuda.mem_get_info()
+                    if free < 3 * 1024**3:
+                        t = PiperTTS(voice=voice or "en_US-amy-medium")
+                        if t.available and t._voice is not None:
+                            return t
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Try kokoro if installed and we have VRAM
         try:
             t = KokoroTTS(voice=voice or "af_heart", device=device)
@@ -403,7 +500,7 @@ def make_tts(kind: str = "auto", voice: str | None = None, device: str = "auto")
         # Then piper
         try:
             t = PiperTTS(voice=voice or "en_US-amy-medium")
-            if t.available and t._piper is not None:
+            if t.available and (t._voice is not None or t._piper is not None):
                 return t
         except Exception:
             pass

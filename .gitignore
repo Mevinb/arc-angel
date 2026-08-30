@@ -21,3 +21,5 @@ dist/
 screenshots/
 .playwright/
 *.gguf
+*.onnx
+*.onnx.json
