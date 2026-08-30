@@ -25,7 +25,7 @@ from ..tools.base import ToolRegistry, ToolResult
 
 logger = logging.getLogger("arc.orchestrator")
 
-MAX_TOOL_ITERATIONS = 25
+MAX_TOOL_ITERATIONS = 500  # effectively unlimited for LoRA batch generation (was 25; 500 allows 50+ images × ~5 steps)
 TOOL_RESULT_CHAR_LIMIT = 6000
 
 
@@ -56,10 +56,10 @@ def build_system_prompt(profile: Optional[Profile],
         "- Be concise. Use short paragraphs or bullet lists.",
         "- If denied permission for an action, explain what was blocked and ask the user "
         "how to proceed.",
-        "- For images: when user asks for one image (e.g. 'a girl in beach'), generate EXACTLY one, then stop. "
-        "After it succeeds, provide the image, offer to download to data/downloads/images, and ask if they want more. "
-        "Do not loop and make multiple images unless explicitly requested.",
-        "- After a successful image generation, download it with file.download to the arc download folder if possible.",
+        "- For images: when user asks for one image (e.g. 'a girl in beach'), generate EXACTLY one, then stop — unless they say LoRA/dataset/batch/unlimited, then keep going until they say stop. "
+        "For LoRA training, user may want 20-100 images: generate in batches, download each with file.download to data/downloads/lora/ or data/downloads/images/, and continue until limit or user stops. "
+        "After each image, download it with file.download to the arc download folder.",
+        "- Tool limit is 500 steps (effectively unlimited) to allow LoRA batches — use it, don't stop early at 25.",
     ]
     if profile is not None and not profile.is_placeholder():
         parts.append("\n# User profile\n" + profile.summarize())

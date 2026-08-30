@@ -163,7 +163,7 @@ class BrowserUseTool(Tool):
     parameters = {
         "properties": {
             "task": {"type": "string", "description": "Natural-language browser task"},
-            "max_steps": {"type": "integer", "description": "Maximum agent steps (default 25)"},
+            "max_steps": {"type": "integer", "description": "Maximum agent steps (default 50, up to 500 for LoRA batch)"},
         },
         "required": ["task"],
     }
@@ -178,7 +178,7 @@ class BrowserUseTool(Tool):
         except ImportError:
             return "browser-use not installed — pip install browser-use && playwright install chromium"
 
-    def run(self, task: str = "", max_steps: int = 25, **_: Any) -> ToolResult:
+    def run(self, task: str = "", max_steps: int = 50, **_: Any) -> ToolResult:
         if not task:
             return ToolResult.failure("No task provided")
         try:
