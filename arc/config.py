@@ -66,7 +66,7 @@ DEFAULTS: Dict[str, Any] = {
         "always_listening": True,
         "full_duplex": True,
         "allow_voice_approval": True,
-        "vad_aggressiveness": 3,
+        "vad_aggressiveness": 2,
         "confidence_threshold": 0.6,
         "wake_word": "hey",
         "wake_word_enabled": True,

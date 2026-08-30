@@ -369,12 +369,17 @@ class VoiceSession:
     def _listener(self) -> None:
         """Background thread: always listening, pushes transcripts to queue."""
         logger.info("Voice listener started (always listening, full duplex, wake_word=%r enabled=%s)", self.wake_word, self.wake_word_enabled)
+        # Fragment joining buffer — handles VAD splitting "Who is the pr-" + "video"
+        pending_text = ""
+        pending_conf = 0.0
+        pending_time = 0.0
         while not self._stop.is_set():
             # Full duplex but with echo suppression: if TTS is speaking, we still
             # listen for barge-in, but we suppress obvious echo of our own voice.
             # Keep a short mute window after TTS starts to avoid immediate echo.
             try:
-                tx = self.stt.listen_once(timeout=1.2, silence_after=0.8)
+                # Increased silence_after to join phrases, less fragmentation
+                tx = self.stt.listen_once(timeout=1.5, silence_after=1.2)
                 text = (tx.text or "").strip()
                 if not text:
                     continue
@@ -432,7 +437,48 @@ class VoiceSession:
                         logger.debug("Ignoring (no wake word, not yet woken): %r", text)
                         self.console.print(f"[dim]Ignored (say 'hey' first): {text}[/dim]")
                         continue
+                # Fragment joining: if text is very short and we got another fragment quickly, join them
+                # e.g. "Who is the pr-" + "video" should be one command
+                now = time.time()
+                if pending_text and (now - pending_time) < 1.8 and len(pending_text.split()) <= 6:
+                    # Check if pending looks incomplete (ends with - or short) or current is continuation
+                    combined = f"{pending_text} {text}".strip()
+                    # If combined is more complete, use it and clear pending
+                    if len(combined.split()) > len(pending_text.split()):
+                        text = combined
+                        tx.text = combined
+                        # Average confidence
+                        try:
+                            tx.confidence = (pending_conf + float(getattr(tx, "confidence", 0.0) or 0.0)) / 2
+                        except Exception:
+                            pass
+                        pending_text = ""
+                        pending_conf = 0.0
+                    else:
+                        pending_text = text
+                        pending_conf = float(getattr(tx, "confidence", 0.0) or 0.0)
+                        pending_time = now
+                        # Wait for possible next fragment instead of pushing immediately
+                        time.sleep(0.3)
+                        continue
+                # If text is very short (1-2 words) and may be fragment, buffer it briefly
+                if len(text.split()) <= 2 and len(text) < 12 and not self._contains_wake_word(text):
+                    # Don't push immediately — wait to see if next fragment completes it
+                    pending_text = text
+                    pending_conf = float(getattr(tx, "confidence", 0.0) or 0.0)
+                    pending_time = now
+                    logger.debug("Buffering short fragment %r for joining", text)
+                    time.sleep(0.4)
+                    # Check if another fragment arrived quickly — if not, push the short one
+                    if time.time() - pending_time >= 0.4 and pending_text == text:
+                        pending_text = ""
+                        # fall through to push
+                    else:
+                        continue
+
                 logger.info("Heard: %r (conf=%.2f)", text, tx.confidence)
+                pending_text = ""
+                pending_conf = 0.0
                 self._queue.put(tx)
                 # If ARC is currently speaking, this will trigger barge-in in the main loop
             except Exception as exc:
@@ -640,17 +686,27 @@ class VoiceSession:
         try:
             while not self._stop.is_set():
                 try:
-                    tx: Transcription = self._queue.get(timeout=0.2)
+                    tx: Transcription = self._queue.get(timeout=0.15)
                 except queue.Empty:
                     continue
                 text = (tx.text or "").strip()
                 if not text:
                     continue
                 self._handle_text(text)
+                # Check for stop after handling (exit phrase sets _stop)
+                if self._stop.is_set():
+                    break
         except KeyboardInterrupt:
             self.console.print("\n[dim]Voice session interrupted (Ctrl-C).[/dim]")
+            self._stop.set()
         finally:
             self._stop.set()
+            # Interrupt STT if it's blocking in listen_once
+            try:
+                # Wake up listener by pushing dummy
+                self._queue.put(Transcription(text="__stop__", confidence=0.0))
+            except Exception:
+                pass
             try:
                 self.tts.stop()
             except Exception:
