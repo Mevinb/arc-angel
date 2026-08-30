@@ -20,3 +20,4 @@ dist/
 # Browser artifacts
 screenshots/
 .playwright/
+*.gguf
