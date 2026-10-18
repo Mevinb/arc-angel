@@ -101,7 +101,9 @@
                         <span class="dlv-title-text">Desktop Pilot • Wayland GNOME 46</span>
                         <span id="dlv-step-badge" class="dlv-step-badge">Step 0</span>
                     </div>
-                    <div class="dlv-controls">
+                        <button id="dlv-drawer-toggle-btn" class="dlv-btn" title="Toggle Master Task Checklist Drawer">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+                        </button>
                         <button id="dlv-mode-btn" class="dlv-btn dlv-btn-pill" title="Toggle between Physical Screen and Isolated Sandbox (:99)">
                             <span id="dlv-mode-text">🖥️ Physical</span>
                         </button>
@@ -118,6 +120,26 @@
                         <button id="dlv-close-btn" class="dlv-btn" title="Minimize / Hide Preview">&times;</button>
                     </div>
                 </div>
+
+                <!-- Master Task Progress Tracker Drawer (Hierarchical Long-Horizon Orchestrator) -->
+                <div id="dlv-task-drawer" class="dlv-task-drawer hidden">
+                    <div class="dlv-task-header">
+                        <div class="dlv-task-title-group">
+                            <span class="dlv-task-icon">🏗️</span>
+                            <span id="dlv-task-title" class="dlv-task-title">Master Task Checklist</span>
+                            <span id="dlv-task-progress-badge" class="dlv-progress-badge">0/0 Sub-goals</span>
+                        </div>
+                        <div class="dlv-task-meta">
+                            <span id="dlv-task-workspace" class="dlv-workspace-badge" title="Active Workspace Directory">data/workspaces/...</span>
+                            <button id="dlv-task-pause-btn" class="dlv-btn dlv-btn-pill" title="Pause or Resume Autonomous Task">
+                                <span id="dlv-task-pause-icon">⏸️</span>
+                                <span id="dlv-task-pause-text">Pause</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="dlv-subgoals-list" class="dlv-subgoals-list"></div>
+                </div>
+
                 <div class="dlv-body">
                     <div class="dlv-screen-container" id="dlv-screen-click" title="Click anywhere on the preview to manually send a click">
                         <img id="dlv-screen-img" src="" alt="Live Desktop View" />

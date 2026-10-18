@@ -63,6 +63,7 @@ from engine import (
     DesktopAgent
 )
 from engine.vision import VisionEngine
+from engine.task_orchestrator import TaskOrchestrator, detect_task_type
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -155,6 +156,9 @@ class ManualActionRequest(BaseModel):
 
 class DisplayModeRequest(BaseModel):
     isolated_display: bool
+
+class TaskActionRequest(BaseModel):
+    task_id: str
 
 
 
@@ -535,6 +539,33 @@ async def set_desktop_display_mode(req: DisplayModeRequest):
         "reason": reason
     }
 
+# Hierarchical Long-Horizon Orchestrator Endpoints
+@app.get("/api/orchestrator/tasks")
+async def list_orchestrator_tasks(limit: int = 20):
+    return TaskOrchestrator.list_tasks(limit=limit)
+
+@app.get("/api/orchestrator/tasks/{task_id}")
+async def get_orchestrator_task(task_id: str):
+    t = TaskOrchestrator.get_task(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return t
+
+@app.post("/api/orchestrator/pause")
+async def pause_orchestrator_task(req: TaskActionRequest):
+    TaskOrchestrator.pause_task(req.task_id)
+    return {"status": "paused", "task_id": req.task_id}
+
+@app.post("/api/orchestrator/resume")
+async def resume_orchestrator_task(req: TaskActionRequest):
+    TaskOrchestrator.resume_task(req.task_id)
+    return {"status": "resumed", "task_id": req.task_id}
+
+@app.post("/api/orchestrator/abort")
+async def abort_orchestrator_task(req: TaskActionRequest):
+    TaskOrchestrator.abort_task(req.task_id)
+    return {"status": "aborted", "task_id": req.task_id}
+
 
 @app.delete("/api/memory/episodic/{mem_id}")
 async def delete_episodic(mem_id: int):
@@ -667,6 +698,85 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
     async def event_generator():
         # First send memory budget & telemetry info (including image_url)
         yield f"data: {json.dumps({'type': 'telemetry', 'budget': budget, 'image_url': image_url})}\n\n"
+
+        # Check if user message requires Hierarchical Long-Horizon Task Orchestration
+        is_lh, task_type = detect_task_type(user_msg, has_reference_image=bool(saved_path))
+        if is_lh:
+            task_type_label = {
+                "dataset_builder": "Reference-Image Dataset Builder",
+                "software_project": "End-to-End Software Project Builder",
+                "general": "Hierarchical Task Orchestrator"
+            }.get(task_type, "Autonomous Task Orchestrator")
+
+            orchestrator = TaskOrchestrator(
+                llm_client=openai_client if provider == PROVIDER_OPENAI else llama_client,
+                controller=desktop_agent.controller
+            )
+            created_task = TaskOrchestrator.create_task(
+                goal=user_msg,
+                task_type=task_type,
+                session_id=session_id,
+                reference_image_path=str(saved_path) if saved_path else None
+            )
+            task_id = created_task["id"]
+            ws_path = created_task["workspace_dir"]
+
+            header_msg = f"🏗️ **{task_type_label} Active**\nTask ID: `{task_id}` • Workspace: `{ws_path}`\nObjective: *{user_msg}*\n\n"
+            yield f"data: {json.dumps({'type': 'token', 'token': header_msg})}\n\n"
+            summary_parts = [header_msg]
+
+            last_shot_url = None
+            async for ev in orchestrator.run_task(task_id):
+                ev_type = ev.get("type")
+                if ev_type == "task_update":
+                    yield f"data: {json.dumps(ev)}\n\n"
+                    if ev.get("message"):
+                        msg_line = f"📋 *{ev['message']}*\n\n"
+                        summary_parts.append(msg_line)
+                        yield f"data: {json.dumps({'type': 'token', 'token': msg_line})}\n\n"
+                elif ev_type == "subgoal_update":
+                    yield f"data: {json.dumps(ev)}\n\n"
+                    sg_title = ev.get("title", "")
+                    sg_idx = ev.get("subgoal_idx", 0)
+                    sg_status = ev.get("status", "")
+                    if sg_status == "running":
+                        sg_line = f"🔄 **Sub-goal {sg_idx}**: *{sg_title}* [In Progress]\n"
+                        summary_parts.append(sg_line)
+                        yield f"data: {json.dumps({'type': 'token', 'token': sg_line})}\n\n"
+                    elif sg_status == "completed":
+                        sg_line = f"✅ **Sub-goal {sg_idx} Completed**: *{sg_title}*\n"
+                        summary_parts.append(sg_line)
+                        yield f"data: {json.dumps({'type': 'token', 'token': sg_line})}\n\n"
+                    elif sg_status == "failed":
+                        sg_line = f"❌ **Sub-goal {sg_idx} Failed**: *{sg_title}*\n"
+                        summary_parts.append(sg_line)
+                        yield f"data: {json.dumps({'type': 'token', 'token': sg_line})}\n\n"
+                elif ev_type == "desktop_step":
+                    shot_url = ev.get("screenshot_url")
+                    if shot_url:
+                        last_shot_url = shot_url
+                    yield f"data: {json.dumps(ev)}\n\n"
+                    thought = ev.get("thought", "")
+                    act = ev.get("action", "")
+                    det = ev.get("detail", "")
+                    if thought:
+                        s_str = f"  - ⚡ `{act}`: {det.split('→')[-1].strip()}\n"
+                        summary_parts.append(s_str)
+                        yield f"data: {json.dumps({'type': 'token', 'token': s_str})}\n\n"
+
+            if last_shot_url:
+                final_link = f"\n[View Final Task Screen State]({last_shot_url})\n"
+                summary_parts.append(final_link)
+                yield f"data: {json.dumps({'type': 'token', 'token': final_link})}\n\n"
+
+            assistant_text = "".join(summary_parts).strip()
+            with db_session() as conn:
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, tokens) VALUES (?, 'assistant', ?, ?)",
+                    (session_id, assistant_text, len(summary_parts))
+                )
+            yield f"data: {json.dumps({'type': 'done', 'full_response': assistant_text})}\n\n"
+            return
 
         # Desktop Agent execution mode (Mutter Wayland GNOME 46)
         if mode == "desktop" or is_desktop_intent(user_msg):

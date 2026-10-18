@@ -260,6 +260,51 @@ class VirtualDisplayManager:
         except Exception:
             return False
 
+    def upload_file_to_dialog(self, file_path: str) -> bool:
+        """Uploads file to GTK dialog via Ctrl+L on virtual display."""
+        p = Path(file_path).resolve()
+        if not p.exists():
+            return False
+        self.press_key("ctrl+l")
+        time.sleep(0.35)
+        self.paste_text(str(p))
+        time.sleep(0.25)
+        self.press_key("Return")
+        time.sleep(0.5)
+        return True
+
+    def wait_for_condition(self, description: str = "", max_wait_sec: int = 45, poll_interval: int = 5) -> bool:
+        """Polls virtual display until operation completes."""
+        elapsed = 0
+        while elapsed < max_wait_sec:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        return True
+
+    def save_latest_download(self, target_path: str, max_age_seconds: int = 120) -> Optional[str]:
+        """Moves latest download from ~/Downloads to target_path."""
+        dl_dir = Path.home() / "Downloads"
+        if not dl_dir.exists():
+            return None
+        now = time.time()
+        candidates = []
+        for item in dl_dir.iterdir():
+            if item.is_file() and not item.name.startswith("."):
+                try:
+                    mtime = item.stat().st_mtime
+                    if now - mtime <= max_age_seconds:
+                        candidates.append((mtime, item))
+                except Exception:
+                    pass
+        if not candidates:
+            return None
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        newest = candidates[0][1]
+        dest = Path(target_path).resolve()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(newest), str(dest))
+        return str(dest)
+
     def read_clipboard(self) -> str:
         """Reads system clipboard."""
         return read_clipboard()

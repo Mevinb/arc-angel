@@ -8,6 +8,8 @@ from pydantic import BaseModel
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+WORKSPACES_DIR = DATA_DIR / "workspaces"
+WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = Path(os.getenv("GROK_DB_PATH", str(DATA_DIR / "grok_memory.db")))
 ACTIVE_MODEL_FILE = Path(os.getenv("GROK_STATE_FILE", str(DATA_DIR / "active_model.json")))
 

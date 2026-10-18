@@ -168,7 +168,7 @@ def parse_type_into_args(args_str: str) -> Optional[Dict[str, Any]]:
 
 
 KNOWN_ACTIONS_REGEX = re.compile(
-    r"\b(launch_app|open_url|navigate_browser|click_id|click_text|click|double_click|right_click|type_into|type_text|paste_text|copy_selection|press_key|scroll|wait|finish)\s*\([^)]*\)",
+    r"\b(launch_app|open_url|navigate_browser|click_id|click_text|click|double_click|right_click|type_into|type_text|paste_text|copy_selection|press_key|scroll|wait|finish|write_file|edit_file|read_file|run_shell|upload_file_to_dialog|wait_for_condition|save_latest_download)\s*\([^)]*\)",
     re.IGNORECASE
 )
 
@@ -288,7 +288,14 @@ Available Tools:
 13. press_key("key_combo") - Press a key or shortcut (e.g. "enter", "ctrl+l", "ctrl+t", "ctrl+w", "alt+tab", "super", "backspace", "escape", "tab").
 14. scroll("up" | "down") - Scroll page up or down.
 15. wait(seconds) - Pause for seconds to let a page or app load (e.g. wait(2)).
-16. finish("summary") - The goal has been successfully accomplished.
+16. write_file("rel_path", "content") - Write code, configs, or dataset metadata to workspace.
+17. edit_file("rel_path", "old_str", "new_str") - Patch workspace files for code updates and self-healing debugging.
+18. read_file("rel_path") - Read workspace file contents or logs.
+19. run_shell("command") - Execute builds, installs (pip/npm), pytest, or shell commands inside workspace.
+20. upload_file_to_dialog("file_path") - Auto-paste and attach reference image/file to browser file picker dialog.
+21. wait_for_condition("description", max_wait_sec=45) - Polls until an async operation (like image generation) completes.
+22. save_latest_download("target_rel_path") - Saves latest download from ~/Downloads to workspace (e.g. "images/img_001.png").
+23. finish("summary") - The goal has been successfully accomplished.
 
 CRITICAL OPERATIONAL RULES:
 1. APP LAUNCHING RULE:
@@ -332,15 +339,19 @@ CRITICAL OPERATIONAL RULES:
 10. LOGGED-IN PROFILES RULE:
    ALWAYS prefer the user's logged-in browser and profile via open_url(url, browser="...", profile="...") or launch_app("...", profile="..."). If the user mentions an account, profile, or username (e.g. 'mevinbenty'), specify profile="mevinbenty". If no profile is specified, use the primary active logged-in profile listed in Available Logged-In Browser Profiles.
 
+11. HYBRID WORKSPACE & CODING RULE:
+   For software projects, coding, file creation, or testing, NEVER try to type code character-by-character into text editors using click or type_text. ALWAYS use write_file("path", "content") and run_shell("command"). Use edit_file("path", "old", "new") to fix bugs.
+
 Respond STRICTLY in this format:
 Thought: <1-2 sentences reasoning about what you see on screen and choosing the next step>
 Action: <single tool call, e.g. launch_app("brave") or type_into(450, 800, "cats", submit=True) or finish("Done")>"""
 
 
 class DesktopAgent:
-    def __init__(self, llm_client=None, llama_client=None, controller=None):
+    def __init__(self, llm_client=None, llama_client=None, controller=None, workspace_manager=None):
         self._custom_controller = controller is not None
         self.controller = controller or WaylandController.get_instance()
+        self.workspace_manager = workspace_manager
         # Client may be a LlamaClient, an OpenAIClient, or a ProviderRouter
         self.llm_client = llm_client or llama_client or LlamaClient()
         self.is_running = False
@@ -1053,6 +1064,72 @@ What is your next action?"""
             sec = float(m.group(1))
             await asyncio.sleep(min(sec, 5.0))
             return f"Waited {sec}s.", False
+
+        # upload_file_to_dialog(file_path)
+        m = re.match(r"upload_file_to_dialog\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
+        if m:
+            fpath = m.group(1).strip()
+            if self.workspace_manager and not os.path.isabs(fpath):
+                fpath = str(self.workspace_manager._resolve_safe_path(fpath))
+            res = self.controller.upload_file_to_dialog(fpath)
+            return f"Uploaded '{fpath}' to file dialog (success={res}).", False
+
+        # wait_for_condition(desc, max_wait=45)
+        m = re.match(r"wait_for_condition\([\"'](.*?)[\"'](?:,\s*(\d+))?\)", action_clean, re.IGNORECASE)
+        if m:
+            desc = m.group(1).strip()
+            max_w = int(m.group(2)) if m.group(2) else 45
+            self.controller.wait_for_condition(desc, max_wait_sec=max_w)
+            return f"Waited for condition '{desc}' (up to {max_w}s).", False
+
+        # save_latest_download(target_path)
+        m = re.match(r"save_latest_download\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
+        if m:
+            target_p = m.group(1).strip()
+            if self.workspace_manager:
+                dest = self.workspace_manager.save_latest_download(target_p)
+            else:
+                dest = self.controller.save_latest_download(target_p)
+            if dest:
+                return f"Saved newest download to '{dest}'.", False
+            return f"No recent download found to save as '{target_p}'.", False
+
+        # write_file(rel_path, content)
+        m = re.match(r"write_file\([\"'](.*?)[\"'],\s*[\"'](.*?)[\"']\)", action_clean, re.IGNORECASE | re.DOTALL)
+        if m:
+            rpath, content = m.group(1).strip(), m.group(2)
+            if self.workspace_manager:
+                res = self.workspace_manager.write_file(rpath, content)
+                return res, False
+            return "Error: write_file requires an active workspace manager.", False
+
+        # edit_file(rel_path, old_str, new_str)
+        m = re.match(r"edit_file\([\"'](.*?)[\"'],\s*[\"'](.*?)[\"'],\s*[\"'](.*?)[\"']\)", action_clean, re.IGNORECASE | re.DOTALL)
+        if m:
+            rpath, old_s, new_s = m.group(1).strip(), m.group(2), m.group(3)
+            if self.workspace_manager:
+                res = self.workspace_manager.edit_file(rpath, old_s, new_s)
+                return res, False
+            return "Error: edit_file requires an active workspace manager.", False
+
+        # read_file(rel_path)
+        m = re.match(r"read_file\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
+        if m:
+            rpath = m.group(1).strip()
+            if self.workspace_manager:
+                content = self.workspace_manager.read_file(rpath)
+                return f"Read '{rpath}':\n{content}", False
+            return "Error: read_file requires an active workspace manager.", False
+
+        # run_shell(command)
+        m = re.match(r"run_shell\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE | re.DOTALL)
+        if m:
+            cmd = m.group(1).strip()
+            if self.workspace_manager:
+                res = self.workspace_manager.run_shell(cmd)
+                out = res["stdout"] or res["stderr"] or f"(exit {res['exit_code']})"
+                return f"Executed `{cmd}` (code {res['exit_code']}):\n{out[:400]}", False
+            return "Error: run_shell requires an active workspace manager.", False
 
         # Fallback keyword checks
         if "ctrl+l" in action_clean.lower():

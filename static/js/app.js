@@ -66,6 +66,31 @@ document.addEventListener('DOMContentLoaded', () => {
     const dlvModeBtn = document.getElementById('dlv-mode-btn');
     const dlvModeText = document.getElementById('dlv-mode-text');
 
+    // Master Task Progress Tracker Drawer (Hierarchical Orchestrator)
+    const dlvTaskDrawer = document.getElementById('dlv-task-drawer');
+    const dlvTaskTitle = document.getElementById('dlv-task-title');
+    const dlvTaskProgressBadge = document.getElementById('dlv-task-progress-badge');
+    const dlvTaskWorkspace = document.getElementById('dlv-task-workspace');
+    const dlvTaskPauseBtn = document.getElementById('dlv-task-pause-btn');
+    const dlvTaskPauseIcon = document.getElementById('dlv-task-pause-icon');
+    const dlvTaskPauseText = document.getElementById('dlv-task-pause-text');
+    const dlvSubgoalsList = document.getElementById('dlv-subgoals-list');
+    const dlvDrawerToggleBtn = document.getElementById('dlv-drawer-toggle-btn');
+
+    let currentActiveTaskId = null;
+    let currentActiveTask = null;
+    let isTaskPaused = false;
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
     function handleViewerImageClick(e, imgElem, containerElem) {
         if (!imgElem || !imgElem.naturalWidth || !imgElem.naturalHeight) return;
         const rect = imgElem.getBoundingClientRect();
@@ -398,6 +423,105 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
         syncDisplayModeUI();
+    }
+
+    function renderTaskSubgoals(task, subgoals) {
+        if (!task) return;
+        currentActiveTaskId = task.id;
+        currentActiveTask = task;
+        if (dlvTaskDrawer) dlvTaskDrawer.classList.remove('hidden');
+        if (desktopLiveViewer) desktopLiveViewer.classList.remove('hidden');
+
+        if (dlvTaskTitle) {
+            const title = task.goal || 'Master Task Checklist';
+            dlvTaskTitle.textContent = title.length > 50 ? title.substring(0, 48) + '...' : title;
+            dlvTaskTitle.title = title;
+        }
+
+        if (dlvTaskWorkspace) {
+            const ws = task.workspace_dir || `data/workspaces/${task.id}`;
+            dlvTaskWorkspace.textContent = ws;
+            dlvTaskWorkspace.title = `Task Workspace: ${ws}`;
+        }
+
+        const sgs = subgoals || task.subgoals || [];
+        const completedCount = sgs.filter(sg => sg.status === 'completed').length;
+        const totalCount = sgs.length;
+        if (dlvTaskProgressBadge) {
+            dlvTaskProgressBadge.textContent = `${completedCount}/${totalCount} Sub-goals`;
+        }
+
+        if (dlvTaskPauseBtn) {
+            if (task.status === 'paused') {
+                if (dlvTaskPauseIcon) dlvTaskPauseIcon.textContent = '▶️';
+                if (dlvTaskPauseText) dlvTaskPauseText.textContent = 'Resume';
+                dlvTaskPauseBtn.classList.add('dlv-btn-paused');
+                isTaskPaused = true;
+            } else {
+                if (dlvTaskPauseIcon) dlvTaskPauseIcon.textContent = '⏸️';
+                if (dlvTaskPauseText) dlvTaskPauseText.textContent = 'Pause';
+                dlvTaskPauseBtn.classList.remove('dlv-btn-paused');
+                isTaskPaused = false;
+            }
+        }
+
+        if (dlvSubgoalsList) {
+            dlvSubgoalsList.innerHTML = '';
+            sgs.forEach((sg, idx) => {
+                const item = document.createElement('div');
+                item.className = `dlv-subgoal-item status-${sg.status || 'pending'}`;
+                
+                let statusIcon = '⏳';
+                if (sg.status === 'completed') statusIcon = '✅';
+                else if (sg.status === 'running') statusIcon = '🔄';
+                else if (sg.status === 'failed') statusIcon = '❌';
+
+                let typeBadgeClass = 'type-desktop';
+                if (sg.tool_domain === 'workspace') typeBadgeClass = 'type-workspace';
+                else if (sg.tool_domain === 'verification') typeBadgeClass = 'type-verification';
+
+                item.innerHTML = `
+                    <span class="dlv-subgoal-icon">${statusIcon}</span>
+                    <div class="dlv-subgoal-content">
+                        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                            <span class="dlv-subgoal-desc">${idx + 1}. ${escapeHtml(sg.description)}</span>
+                            <span class="dlv-subgoal-badge ${typeBadgeClass}">${escapeHtml(sg.tool_domain || 'auto')}</span>
+                        </div>
+                        ${sg.result_summary ? `<div class="dlv-subgoal-summary">${escapeHtml(sg.result_summary)}</div>` : ''}
+                    </div>
+                `;
+                dlvSubgoalsList.appendChild(item);
+            });
+        }
+    }
+
+    if (dlvDrawerToggleBtn && dlvTaskDrawer) {
+        dlvDrawerToggleBtn.addEventListener('click', () => {
+            dlvTaskDrawer.classList.toggle('collapsed');
+        });
+    }
+
+    if (dlvTaskPauseBtn) {
+        dlvTaskPauseBtn.addEventListener('click', async () => {
+            if (!currentActiveTaskId) return;
+            try {
+                if (isTaskPaused) {
+                    await API.resumeTask(currentActiveTaskId);
+                    isTaskPaused = false;
+                    if (dlvTaskPauseIcon) dlvTaskPauseIcon.textContent = '⏸️';
+                    if (dlvTaskPauseText) dlvTaskPauseText.textContent = 'Pause';
+                    dlvTaskPauseBtn.classList.remove('dlv-btn-paused');
+                } else {
+                    await API.pauseTask(currentActiveTaskId);
+                    isTaskPaused = true;
+                    if (dlvTaskPauseIcon) dlvTaskPauseIcon.textContent = '▶️';
+                    if (dlvTaskPauseText) dlvTaskPauseText.textContent = 'Resume';
+                    dlvTaskPauseBtn.classList.add('dlv-btn-paused');
+                }
+            } catch (err) {
+                console.error('Failed to toggle task pause/resume', err);
+            }
+        });
     }
 
     function isLikelyDesktop(text) {
@@ -1086,6 +1210,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 if (desktopStep.status === 'completed' || desktopStep.status === 'error' || desktopStep.status === 'aborted') {
                     isDesktopRunning = false;
+                }
+            },
+            (taskUpdate) => {
+                if (taskUpdate && taskUpdate.task) {
+                    currentActiveTask = taskUpdate.task;
+                    currentActiveTaskId = taskUpdate.task_id || taskUpdate.task.id;
+                    renderTaskSubgoals(currentActiveTask, currentActiveTask.subgoals);
+                }
+            },
+            (subgoalUpdate) => {
+                if (subgoalUpdate && subgoalUpdate.task) {
+                    currentActiveTask = subgoalUpdate.task;
+                    currentActiveTaskId = subgoalUpdate.task_id || subgoalUpdate.task.id;
+                    renderTaskSubgoals(currentActiveTask, currentActiveTask.subgoals);
+                } else if (currentActiveTask && subgoalUpdate && subgoalUpdate.subgoal) {
+                    if (!currentActiveTask.subgoals) currentActiveTask.subgoals = [];
+                    const sgIdx = currentActiveTask.subgoals.findIndex(s => s.id === subgoalUpdate.subgoal.id || s.sequence_order === subgoalUpdate.subgoal.sequence_order);
+                    if (sgIdx >= 0) {
+                        currentActiveTask.subgoals[sgIdx] = subgoalUpdate.subgoal;
+                    } else {
+                        currentActiveTask.subgoals.push(subgoalUpdate.subgoal);
+                    }
+                    renderTaskSubgoals(currentActiveTask, currentActiveTask.subgoals);
                 }
             }
         );

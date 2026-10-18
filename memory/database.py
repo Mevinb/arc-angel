@@ -137,5 +137,42 @@ def init_db():
         );
         """)
 
+        # Autonomous Tasks (Hierarchical Long-Horizon Orchestrator)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS autonomous_tasks (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            goal TEXT NOT NULL,
+            task_type TEXT DEFAULT 'general',
+            workspace_dir TEXT NOT NULL,
+            reference_image_path TEXT,
+            status TEXT DEFAULT 'running',
+            total_subgoals INTEGER DEFAULT 0,
+            completed_subgoals INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_session ON autonomous_tasks(session_id);")
+
+        # Task Sub-goals
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS task_subgoals (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            idx INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            tool_preference TEXT DEFAULT 'hybrid',
+            status TEXT DEFAULT 'pending',
+            result_summary TEXT,
+            attempts INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (task_id) REFERENCES autonomous_tasks(id) ON DELETE CASCADE
+        );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_subgoals_task ON task_subgoals(task_id, idx);")
+
 # Initialize database on module load
 init_db()

@@ -125,7 +125,7 @@ const API = {
     /**
      * SSE Streaming Chat with optional image support
      */
-    streamChat(sessionId, message, mode, imageData, onTelemetry, onToken, onError, onDone, onDesktopStep) {
+    streamChat(sessionId, message, mode, imageData, onTelemetry, onToken, onError, onDone, onDesktopStep, onTaskUpdate, onSubgoalUpdate) {
         // If 4th arg is a function, imageData was omitted
         let imgData = null;
         let cbTelemetry = onTelemetry;
@@ -133,6 +133,8 @@ const API = {
         let cbError = onError;
         let cbDone = onDone;
         let cbDesktopStep = onDesktopStep;
+        let cbTaskUpdate = onTaskUpdate;
+        let cbSubgoalUpdate = onSubgoalUpdate;
         if (typeof imageData === 'function') {
             imgData = null;
             cbTelemetry = imageData;
@@ -140,6 +142,8 @@ const API = {
             cbError = onToken;
             cbDone = onError;
             cbDesktopStep = onDone;
+            cbTaskUpdate = onDesktopStep;
+            cbSubgoalUpdate = onTaskUpdate;
         } else {
             imgData = imageData;
         }
@@ -188,6 +192,10 @@ const API = {
                                 if (cbToken) cbToken(data.token, data.tok_sec, data.total_tokens);
                             } else if (data.type === 'desktop_step') {
                                 if (cbDesktopStep) cbDesktopStep(data);
+                            } else if (data.type === 'task_update') {
+                                if (cbTaskUpdate) cbTaskUpdate(data);
+                            } else if (data.type === 'subgoal_update') {
+                                if (cbSubgoalUpdate) cbSubgoalUpdate(data);
                             } else if (data.type === 'error') {
                                 if (cbError) cbError(data.message);
                             } else if (data.type === 'done') {
@@ -243,6 +251,46 @@ const API = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ isolated_display: isolated })
+        });
+        return res.json();
+    },
+
+    /**
+     * Hierarchical Long-Horizon Task Orchestrator endpoints
+     */
+    async listTasks() {
+        const res = await fetch('/api/orchestrator/tasks');
+        return res.json();
+    },
+
+    async getTask(taskId) {
+        const res = await fetch(`/api/orchestrator/tasks/${taskId}`);
+        return res.json();
+    },
+
+    async pauseTask(taskId) {
+        const res = await fetch('/api/orchestrator/pause', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_id: taskId })
+        });
+        return res.json();
+    },
+
+    async resumeTask(taskId) {
+        const res = await fetch('/api/orchestrator/resume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_id: taskId })
+        });
+        return res.json();
+    },
+
+    async abortTask(taskId) {
+        const res = await fetch('/api/orchestrator/abort', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_id: taskId })
         });
         return res.json();
     }

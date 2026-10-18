@@ -473,6 +473,72 @@ class WaylandController:
             time.sleep(0.2)
             self.press_key("enter")
 
+    def upload_file_to_dialog(self, file_path: str) -> bool:
+        """
+        When a browser file-picker dialog opens (after clicking an 'Upload' or 'Attach' button),
+        sends Ctrl+L to reveal direct path input in GTK/GNOME file chooser, pastes the absolute file_path,
+        and presses Enter to attach the file.
+        """
+        p = Path(file_path).resolve()
+        if not p.exists():
+            logger.warning("Upload target file does not exist: %s", file_path)
+            return False
+
+        abs_path = str(p)
+        logger.info("Uploading file to GTK dialog: %s", abs_path)
+        self.press_key("ctrl+l")
+        time.sleep(0.35)
+        self.paste_text(abs_path)
+        time.sleep(0.25)
+        self.press_key("enter")
+        time.sleep(0.5)
+        return True
+
+    def wait_for_condition(self, description: str = "", max_wait_sec: int = 45, poll_interval: int = 5) -> bool:
+        """
+        Polls the system or pauses execution until an asynchronous operation
+        (such as an AI image generation or a heavy asset compile) settles,
+        avoiding wasting LLM cognitive steps.
+        """
+        logger.info("Waiting for condition: '%s' (max %ds, poll every %ds)", description, max_wait_sec, poll_interval)
+        elapsed = 0
+        while elapsed < max_wait_sec:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+            self._touch()
+        return True
+
+    def save_latest_download(self, target_path: str, max_age_seconds: int = 120) -> Optional[str]:
+        """
+        Finds the newest file downloaded in ~/Downloads in the last max_age_seconds
+        and moves it to target_path.
+        """
+        dl_dir = Path.home() / "Downloads"
+        if not dl_dir.exists():
+            return None
+
+        now = time.time()
+        candidates = []
+        for item in dl_dir.iterdir():
+            if item.is_file() and not item.name.startswith("."):
+                try:
+                    mtime = item.stat().st_mtime
+                    if now - mtime <= max_age_seconds:
+                        candidates.append((mtime, item))
+                except Exception:
+                    pass
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        newest = candidates[0][1]
+        dest = Path(target_path).resolve()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(newest), str(dest))
+        logger.info("save_latest_download moved '%s' -> '%s'", newest.name, dest)
+        return str(dest)
+
     # ========================== Screen Capture ==========================
 
     def capture_screen(self, out_path: Optional[str] = None, include_cursor: bool = True) -> str:
