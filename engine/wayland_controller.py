@@ -19,6 +19,8 @@ import urllib.parse
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Callable
 
+from .browser_profiles import resolve_browser_and_profile
+
 try:  # PyGObject is only required by the Desktop Pilot, not by chat / ChatGPT mode
     import gi
     gi.require_version("Gio", "2.0")
@@ -532,13 +534,22 @@ class WaylandController:
     # ========================== App & Window Utils ==========================
 
     @classmethod
-    def resolve_app_command(cls, command_or_app: str) -> str:
-        """Resolves common browser and application aliases to reliable CLI commands."""
+    def resolve_app_command(cls, command_or_app: str, profile: Optional[str] = None) -> str:
+        """Resolves common browser and application aliases to reliable CLI commands with exact profile directory."""
         app = command_or_app.strip().lower()
         if app in ["brave", "brave-browser"]:
-            return "brave-browser --new-window --profile-directory='Default' || /snap/bin/brave --new-window --profile-directory='Default' || brave --new-window --profile-directory='Default'"
+            _, resolved_pdir, _ = resolve_browser_and_profile("brave", profile)
+            return (
+                f"brave-browser --new-window --profile-directory='{resolved_pdir}' || "
+                f"/snap/bin/brave --new-window --profile-directory='{resolved_pdir}' || "
+                f"brave --new-window --profile-directory='{resolved_pdir}'"
+            )
         elif app in ["chrome", "google-chrome"]:
-            return "google-chrome --new-window --profile-directory='Default'"
+            bin_cmd, resolved_pdir, _ = resolve_browser_and_profile("chrome", profile)
+            return f"{bin_cmd} --new-window --profile-directory='{resolved_pdir}'"
+        elif app in ["chromium"]:
+            bin_cmd, resolved_pdir, _ = resolve_browser_and_profile("chromium", profile)
+            return f"{bin_cmd} --new-window --profile-directory='{resolved_pdir}'"
         elif app in ["files", "nautilus"]:
             return "nautilus"
         elif app in ["terminal", "gnome-terminal"]:
@@ -552,9 +563,9 @@ class WaylandController:
         return command_or_app
 
     @classmethod
-    def launch_app(cls, command_or_app: str, wait_seconds: float = 2.5) -> None:
+    def launch_app(cls, command_or_app: str, wait_seconds: float = 2.5, profile: Optional[str] = None) -> None:
         """Launches an application in the background and waits for the window to render on Wayland."""
-        cmd = cls.resolve_app_command(command_or_app)
+        cmd = cls.resolve_app_command(command_or_app, profile=profile)
         subprocess.Popen(
             cmd,
             shell=True,
@@ -577,7 +588,7 @@ class WaylandController:
         return read_clipboard()
 
     @classmethod
-    def open_url(cls, url_or_query: str, browser: str = "brave", profile: str = "Default") -> None:
+    def open_url(cls, url_or_query: str, browser: Optional[str] = None, profile: Optional[str] = None) -> None:
         """
         Directly opens a URL or Google search query in the browser in 1 fast step,
         bypassing the fragile launch -> wait -> Ctrl+L -> type -> Enter sequence.
@@ -589,14 +600,16 @@ class WaylandController:
         elif target.startswith("www."):
             target = f"https://{target}"
 
-        browser_lower = browser.lower()
-        if "chrome" in browser_lower:
-            cmd = f"google-chrome --new-window --profile-directory='{profile}' \"{target}\""
+        bin_cmd, resolved_pdir, _ = resolve_browser_and_profile(browser, profile)
+        if "chrome" in bin_cmd.lower():
+            cmd = f"google-chrome --new-window --profile-directory='{resolved_pdir}' \"{target}\""
+        elif "chromium" in bin_cmd.lower():
+            cmd = f"chromium --new-window --profile-directory='{resolved_pdir}' \"{target}\""
         else:
             cmd = (
-                f"brave-browser --new-window --profile-directory='{profile}' \"{target}\" || "
-                f"/snap/bin/brave --new-window --profile-directory='{profile}' \"{target}\" || "
-                f"brave --new-window --profile-directory='{profile}' \"{target}\""
+                f"brave-browser --new-window --profile-directory='{resolved_pdir}' \"{target}\" || "
+                f"/snap/bin/brave --new-window --profile-directory='{resolved_pdir}' \"{target}\" || "
+                f"brave --new-window --profile-directory='{resolved_pdir}' \"{target}\""
             )
 
         subprocess.Popen(

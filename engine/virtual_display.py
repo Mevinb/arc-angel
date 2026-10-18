@@ -11,9 +11,13 @@ import time
 import shutil
 import urllib.parse
 import subprocess
+import logging
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Callable
 from engine.wayland_controller import WaylandController, copy_to_clipboard, read_clipboard
+from .browser_profiles import resolve_browser_and_profile
+
+logger = logging.getLogger("virtual_display")
 
 DEFAULT_VIRTUAL_DISPLAY = os.getenv("PILOT_VIRTUAL_DISPLAY", ":99")
 DEFAULT_RESOLUTION = "1920x1080x24"
@@ -237,8 +241,78 @@ class VirtualDisplayManager:
         """Reads system clipboard."""
         return read_clipboard()
 
-    def open_url(self, url_or_query: str, browser: str = "brave", profile: str = "Default") -> None:
-        """Opens URL or Google search query in an isolated browser window inside the virtual display."""
+    @classmethod
+    def sync_sandbox_browser_session(cls, user_data_dir: Path, profile_dir: str, browser_name: str) -> Path:
+        """
+        Synchronizes Local State and essential session files (Cookies, Login Data, Preferences, Storage)
+        from the user's host browser directory into an isolated sandbox user-data-dir
+        (/tmp/grok_logged_in_profile/<browser_name>/), avoiding Chromium SingletonLock conflicts.
+        """
+        sandbox_base = Path(f"/tmp/grok_logged_in_profile/{browser_name}")
+        sandbox_profile = sandbox_base / profile_dir
+        sandbox_profile.mkdir(parents=True, exist_ok=True)
+
+        # 1. Sync Local State
+        src_state = user_data_dir / "Local State"
+        dst_state = sandbox_base / "Local State"
+        if src_state.exists():
+            try:
+                shutil.copy2(src_state, dst_state)
+            except Exception as e:
+                logger.warning("Failed to copy Local State to sandbox: %s", e)
+
+        # 2. Sync essential files and directories for authentication
+        essential_files = [
+            "Cookies", "Cookies-journal",
+            "Login Data", "Login Data-journal",
+            "Web Data", "Web Data-journal",
+            "Preferences", "Secure Preferences"
+        ]
+        src_profile = user_data_dir / profile_dir
+        if src_profile.exists():
+            for fname in essential_files:
+                src_f = src_profile / fname
+                dst_f = sandbox_profile / fname
+                if src_f.exists():
+                    try:
+                        shutil.copy2(src_f, dst_f)
+                    except Exception:
+                        pass
+
+            # Network/Cookies if present
+            src_net_cookies = src_profile / "Network" / "Cookies"
+            if src_net_cookies.exists():
+                dst_net = sandbox_profile / "Network"
+                dst_net.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(src_net_cookies, dst_net / "Cookies")
+                except Exception:
+                    pass
+
+            # Copy key storage directories (Local Storage, Session Storage, IndexedDB) if they exist
+            storage_dirs = ["Local Storage", "Session Storage", "IndexedDB", "Extension Cookies"]
+            for sdir in storage_dirs:
+                src_s = src_profile / sdir
+                dst_s = sandbox_profile / sdir
+                if src_s.exists() and not dst_s.exists():
+                    try:
+                        shutil.copytree(src_s, dst_s, symlinks=True, ignore_dangling_symlinks=True)
+                    except Exception:
+                        pass
+
+        # 3. Always clean lock files in the sandbox directory so Chromium never thinks another instance is running
+        for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+            lock_path = sandbox_base / lock_name
+            if lock_path.exists() or lock_path.is_symlink():
+                try:
+                    lock_path.unlink()
+                except Exception:
+                    pass
+
+        return sandbox_base
+
+    def open_url(self, url_or_query: str, browser: Optional[str] = None, profile: Optional[str] = None) -> None:
+        """Opens URL or Google search query in an isolated, authenticated browser window inside the virtual display."""
         self.ensure_running()
         target = url_or_query.strip()
         is_url = bool(re.match(r"^(https?://|www\.|file:///)", target, re.IGNORECASE))
@@ -247,18 +321,29 @@ class VirtualDisplayManager:
         elif target.startswith("www."):
             target = f"https://{target}"
 
+        bin_cmd, resolved_pdir, user_data_dir = resolve_browser_and_profile(browser, profile)
+        browser_tag = "chrome" if "chrome" in bin_cmd.lower() else "brave"
+
+        # Sync session cookies & logins into sandbox directory
+        sandbox_base = self.sync_sandbox_browser_session(user_data_dir, resolved_pdir, browser_tag)
+
         env = {
             **os.environ,
             "DISPLAY": self.display,
+            "DBUS_SESSION_BUS_ADDRESS": os.environ.get("DBUS_SESSION_BUS_ADDRESS", ""),
+            "GNOME_KEYRING_CONTROL": os.environ.get("GNOME_KEYRING_CONTROL", ""),
+            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
         }
 
-        # Dedicated sandbox browser profile inside /tmp/grok_sandbox_browser
-        sandbox_profile_dir = "/tmp/grok_sandbox_browser"
-        flags = f"--ozone-platform=x11 --user-data-dir='{sandbox_profile_dir}' --no-first-run --new-window"
+        flags = (
+            f"--ozone-platform=x11 --user-data-dir='{sandbox_base}' "
+            f"--profile-directory='{resolved_pdir}' --password-store=basic --no-first-run --new-window"
+        )
 
-        browser_lower = browser.lower()
-        if "chrome" in browser_lower:
+        if "chrome" in bin_cmd.lower():
             cmd = f"google-chrome {flags} \"{target}\""
+        elif "chromium" in bin_cmd.lower():
+            cmd = f"chromium {flags} \"{target}\""
         else:
             cmd = (
                 f"brave-browser {flags} \"{target}\" || "
@@ -276,11 +361,41 @@ class VirtualDisplayManager:
         )
         time.sleep(2.5)
 
-    def launch_app(self, command_or_app: str, wait_seconds: float = 2.5) -> None:
-        """Launches an application inside the virtual display."""
+    def launch_app(self, command_or_app: str, wait_seconds: float = 2.5, profile: Optional[str] = None) -> None:
+        """Launches an application inside the virtual display with sandbox profile syncing for browsers."""
         self.ensure_running()
-        cmd = WaylandController.resolve_app_command(command_or_app)
-        env = {**os.environ, "DISPLAY": self.display}
+        app = command_or_app.strip().lower()
+
+        env = {
+            **os.environ,
+            "DISPLAY": self.display,
+            "DBUS_SESSION_BUS_ADDRESS": os.environ.get("DBUS_SESSION_BUS_ADDRESS", ""),
+            "GNOME_KEYRING_CONTROL": os.environ.get("GNOME_KEYRING_CONTROL", ""),
+            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
+        }
+
+        if app in ["brave", "brave-browser", "chrome", "google-chrome", "chromium"]:
+            bin_cmd, resolved_pdir, user_data_dir = resolve_browser_and_profile(app, profile)
+            browser_tag = "chrome" if "chrome" in bin_cmd.lower() else "brave"
+            sandbox_base = self.sync_sandbox_browser_session(user_data_dir, resolved_pdir, browser_tag)
+
+            flags = (
+                f"--ozone-platform=x11 --user-data-dir='{sandbox_base}' "
+                f"--profile-directory='{resolved_pdir}' --password-store=basic --no-first-run --new-window"
+            )
+            if "chrome" in bin_cmd.lower():
+                cmd = f"google-chrome {flags}"
+            elif "chromium" in bin_cmd.lower():
+                cmd = f"chromium {flags}"
+            else:
+                cmd = (
+                    f"brave-browser {flags} || "
+                    f"/snap/bin/brave {flags} || "
+                    f"brave {flags}"
+                )
+        else:
+            cmd = WaylandController.resolve_app_command(command_or_app, profile=profile)
+
         subprocess.Popen(
             cmd,
             shell=True,

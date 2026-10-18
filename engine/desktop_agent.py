@@ -21,6 +21,8 @@ logger = logging.getLogger("desktop_agent")
 from .wayland_controller import WaylandController
 from .process_manager import LlamaProcessManager
 from .llama_client import LlamaClient
+from .browser_profiles import get_available_profiles_summary
+from memory.dossier import UserDossier
 from persona.chatml import format_chatml_prompt
 from config import (
     get_active_provider,
@@ -162,8 +164,8 @@ SYSTEM_PROMPT = """You are Grok Desktop Agent, an intelligent AI piloting a Linu
 You control the desktop using mouse and keyboard actions to achieve the user's objective.
 
 Available Tools:
-1. open_url("url_or_query") - Directly opens browser to any URL or Google search query in 1 fast step (e.g. open_url("https://github.com") or open_url("weather in tokyo")). PREFERRED for web browsing!
-2. launch_app("app_name") - Launch an application (e.g. "brave", "google-chrome", "nautilus", "gnome-terminal", "gnome-calculator", "code", "spotify").
+1. open_url("url_or_query", browser="...", profile="...") - Directly opens browser to any URL or Google search query in 1 fast step (e.g. open_url("https://github.com", profile="mevinbenty") or open_url("weather in tokyo")). PREFERRED for web browsing!
+2. launch_app("app_name", profile="...") - Launch an application (e.g. launch_app("chrome", profile="mevinbenty") or launch_app("brave") or launch_app("nautilus")).
 3. navigate_browser("url_or_query") - In an already-open browser window, automatically focuses the address bar (Ctrl+L), types the URL/query, and presses Enter.
 4. click(x, y) - Move the mouse cursor to absolute coordinate (x, y) and left-click.
 5. double_click(x, y) - Move to (x, y) and double-click.
@@ -208,6 +210,9 @@ CRITICAL OPERATIONAL RULES:
    Do NOT output <think>...</think> tags or conversational preamble. Immediately output:
    Thought: <1-2 sentences reasoning about what you see on screen and choosing the next step>
    Action: <single tool call, e.g. launch_app("brave") or click(450, 80) or finish("Done")>
+
+9. LOGGED-IN PROFILES RULE:
+   ALWAYS prefer the user's logged-in browser and profile via open_url(url, browser="...", profile="...") or launch_app("...", profile="..."). If the user mentions an account, profile, or username (e.g. 'mevinbenty'), specify profile="mevinbenty". If no profile is specified, use the primary active logged-in profile listed in Available Logged-In Browser Profiles.
 
 Respond STRICTLY in this format:
 Thought: <1-2 sentences reasoning about what you see on screen and choosing the next step>
@@ -426,6 +431,32 @@ class DesktopAgent:
                 # 2. Build prompt for the active engine (local model or ChatGPT)
                 history_text = "\n".join(history_log[-4:]) if history_log else "None."
                 vision_hint = "[Live screenshot attached for visual inspection]\n\n" if (has_vision and image_data) else ""
+
+                # Dynamic browser profiles & user dossier context
+                try:
+                    profiles_summary = get_available_profiles_summary()
+                except Exception:
+                    profiles_summary = ""
+
+                dossier_hint = ""
+                try:
+                    facts = UserDossier.get_all_facts()
+                    relevant = [
+                        f"- {f['key'].replace('_', ' ').title()}: {f['value']}"
+                        for f in facts
+                        if any(k in f['key'].lower() for k in ['browser', 'profile', 'name', 'account', 'email', 'login', 'identity'])
+                    ]
+                    if relevant:
+                        dossier_hint = "User Identity & Defaults:\n" + "\n".join(relevant)
+                except Exception:
+                    dossier_hint = ""
+
+                system_content = SYSTEM_PROMPT
+                if profiles_summary:
+                    system_content += f"\n\n{profiles_summary}"
+                if dossier_hint:
+                    system_content += f"\n\n{dossier_hint}"
+
                 user_prompt = f"""Goal: {goal}
 
 {stalled_warning}{vision_hint}Current Screen State:
@@ -437,7 +468,7 @@ Recent Steps Taken:
 What is your next action?"""
 
                 agent_messages = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": system_content},
                     {"role": "user", "content": user_prompt}
                 ]
                 chatml_prompt = format_chatml_prompt(agent_messages)
@@ -485,7 +516,7 @@ Recent Steps Taken:
 
 What is your next action?"""
                     retry_messages = [
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": system_content},
                         {"role": "user", "content": retry_user_prompt}
                     ]
                     retry_chatml = format_chatml_prompt(retry_messages)
@@ -596,13 +627,47 @@ What is your next action?"""
             summary = m.group(1).strip() or "Goal achieved."
             return f"Task completed: {summary}", True
 
-        # open_url(url_or_query)
-        m = re.match(r"open_url\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
+        # open_url(url_or_query, browser=..., profile=...)
+        m = re.match(r"open_url\((.*)\)", action_clean, re.IGNORECASE | re.DOTALL)
         if m:
-            target = m.group(1).strip()
-            self.controller.open_url(target)
-            await asyncio.sleep(2.0)
-            return f"Opened '{target}' directly in browser.", False
+            args_str = m.group(1).strip()
+            target = ""
+            browser = None
+            profile = None
+
+            target_match = re.match(r"[\"'](.*?)[\"']", args_str)
+            if target_match:
+                target = target_match.group(1).strip()
+                rem = args_str[target_match.end():].strip()
+
+                prof_kw = re.search(r"profile\s*=\s*[\"'](.*?)[\"']", rem, re.IGNORECASE)
+                if prof_kw:
+                    profile = prof_kw.group(1).strip()
+                brow_kw = re.search(r"browser\s*=\s*[\"'](.*?)[\"']", rem, re.IGNORECASE)
+                if brow_kw:
+                    browser = brow_kw.group(1).strip()
+
+                if not profile and not browser:
+                    pos_matches = re.findall(r"[\"'](.*?)[\"']", rem)
+                    if len(pos_matches) == 1:
+                        if pos_matches[0].lower() in ["brave", "chrome", "google-chrome", "chromium"]:
+                            browser = pos_matches[0]
+                        else:
+                            profile = pos_matches[0]
+                    elif len(pos_matches) >= 2:
+                        browser = pos_matches[0]
+                        profile = pos_matches[1]
+
+            if target:
+                if browser or profile:
+                    self.controller.open_url(target, browser=browser, profile=profile)
+                else:
+                    self.controller.open_url(target)
+                await asyncio.sleep(2.0)
+                detail = f"Opened '{target}' in browser"
+                if browser or profile:
+                    detail += f" (browser={browser or 'auto'}, profile={profile or 'active'})"
+                return f"{detail}.", False
 
         # navigate_browser(url_or_query)
         m = re.match(r"navigate_browser\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
@@ -621,30 +686,36 @@ What is your next action?"""
                 False
             )
 
-        # launch_app(app_name)
-        m = re.match(r"launch_app\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
+        # launch_app(app_name, profile=...)
+        m = re.match(r"launch_app\((.*)\)", action_clean, re.IGNORECASE | re.DOTALL)
         if m:
-            app = m.group(1).strip().lower()
-            if app in ["brave", "brave-browser"]:
-                cmd = "brave-browser --new-window --profile-directory='Default' || /snap/bin/brave --new-window --profile-directory='Default' || brave --new-window --profile-directory='Default'"
-            elif app in ["chrome", "google-chrome"]:
-                cmd = "google-chrome --new-window --profile-directory='Default'"
-            elif app in ["files", "nautilus"]:
-                cmd = "nautilus"
-            elif app in ["terminal", "gnome-terminal"]:
-                cmd = "gnome-terminal"
-            elif app in ["calculator", "gnome-calculator"]:
-                cmd = "gnome-calculator"
-            elif app in ["code", "vscode"]:
-                cmd = "code"
-            elif app in ["settings"]:
-                cmd = "gnome-control-center"
-            else:
-                cmd = app
+            args_str = m.group(1).strip()
+            app = ""
+            profile = None
 
-            self.controller.launch_app(cmd, wait_seconds=2.5)
-            await asyncio.sleep(0.5)
-            return f"Launched application '{app}'.", False
+            app_match = re.match(r"[\"'](.*?)[\"']", args_str)
+            if app_match:
+                app = app_match.group(1).strip().lower()
+                rem = args_str[app_match.end():].strip()
+
+                prof_kw = re.search(r"profile\s*=\s*[\"'](.*?)[\"']", rem, re.IGNORECASE)
+                if prof_kw:
+                    profile = prof_kw.group(1).strip()
+                else:
+                    pos = re.findall(r"[\"'](.*?)[\"']", rem)
+                    if pos:
+                        profile = pos[0].strip()
+
+            if app:
+                if profile:
+                    self.controller.launch_app(app, wait_seconds=2.5, profile=profile)
+                else:
+                    self.controller.launch_app(app, wait_seconds=2.5)
+                await asyncio.sleep(0.5)
+                detail = f"Launched application '{app}'"
+                if profile:
+                    detail += f" with profile '{profile}'"
+                return f"{detail}.", False
 
         # click(x, y)
         m = re.match(r"click\((\d+),\s*(\d+)\)", action_clean, re.IGNORECASE)
