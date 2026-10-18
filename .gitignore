@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Sensitive Data & API Keys
+data/openai_key.json
+*.key
+*.pem
+
+# Local Databases & Runtime State
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.log
+data/*.pid
+data/running_process.json
+data/pilot_display_mode.json
+data/long_convo_*
+data/uploads/
+
+# Models & Weights
+*.gguf
+*.bin
+
+# Temporary Caches & Screenshots
+/tmp/
+/tmp/grok_shots/
+.DS_Store
+Thumbs.db
+
+# IDE & Editor
+.idea/
+.vscode/
+*.swp
+*.swo

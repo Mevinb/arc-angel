@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GROK // Local Uncensored AI</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <!-- Highlight.js for syntax highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <!-- Marked.js for markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body class="dark-theme">
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-logo">/</div>
+                <div class="brand-text">
+                    <span class="brand-title">GROK</span>
+                    <span class="brand-badge">UNCENSORED</span>
+                </div>
+            </div>
+
+            <button id="new-chat-btn" class="btn btn-primary new-chat">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                <span>New Conversation</span>
+            </button>
+
+            <div class="sidebar-section-title">CHATS</div>
+            <div id="session-list" class="session-list">
+                <!-- Dynamically populated -->
+            </div>
+
+            <div class="sidebar-footer">
+                <button id="open-memory-btn" class="btn btn-secondary memory-trigger">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+                    <span>Memory Dossier</span>
+                    <span id="fact-counter" class="badge">0</span>
+                </button>
+
+                <div class="engine-status-card">
+                    <div class="status-indicator">
+                        <span id="status-dot" class="dot dot-offline"></span>
+                        <span id="status-text">Engine Offline</span>
+                    </div>
+                    <div class="engine-actions">
+                        <select id="gpu-mode-select" class="gpu-mode-dropdown" title="GPU Offload Layers">
+                            <option value="33" selected>Full GPU (33L)</option>
+                            <option value="0">CPU</option>
+                        </select>
+                        <button id="openai-key-btn" class="btn btn-tiny" title="Configure ChatGPT / OpenAI API key">🔑</button>
+                        <button id="toggle-engine-btn" class="btn btn-tiny">Start</button>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="chat-main">
+            <!-- Top Bar -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <div class="model-selector-container">
+                        <div class="model-selector-label">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                        </div>
+                        <select id="model-select" class="model-dropdown" title="Select AI Model">
+                            <!-- Populated dynamically via /api/models -->
+                        </select>
+                        <span id="model-badge" class="badge-vision hidden">VISION</span>
+                    </div>
+                    <div class="mode-selector">
+                        <button class="mode-pill active" data-mode="classic">Grok Classic</button>
+                        <button class="mode-pill" data-mode="unhinged">Unhinged</button>
+                        <button class="mode-pill" data-mode="deep_truth">Deep Truth</button>
+                        <button class="mode-pill" data-mode="desktop" title="Mutter Wayland Desktop Pilot (Chrome & Apps)"><span style="margin-right: 4px;">🖱️</span>Desktop Pilot</button>
+                    </div>
+                </div>
+                <div class="topbar-right">
+                    <button id="stop-desktop-btn" class="btn btn-secondary btn-sm hidden" style="border-color: #ef4444; color: #ef4444;" title="Emergency Stop Desktop Pilot">
+                        <span>⏹ Stop Pilot</span>
+                    </button>
+                    <button id="export-chat-btn" class="btn btn-secondary btn-sm" title="Export Chat">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                        <span>Export</span>
+                    </button>
+                    <div class="telemetry-chip" id="telemetry-bar" title="Context Token Budget">
+                        <span class="telemetry-icon">🧠</span>
+                        <span id="budget-info">Context: Bounded & Ready</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Live Desktop Viewer (Mutter Wayland) -->
+            <div id="desktop-live-viewer" class="desktop-live-viewer hidden">
+                <div class="dlv-header">
+                    <div class="dlv-title">
+                        <span class="dlv-pulse"></span>
+                        <span class="dlv-title-text">Desktop Pilot • Wayland GNOME 46</span>
+                        <span id="dlv-step-badge" class="dlv-step-badge">Step 0</span>
+                    </div>
+                    <div class="dlv-controls">
+                        <button id="dlv-mode-btn" class="dlv-btn dlv-btn-pill" title="Toggle between Physical Screen and Isolated Sandbox (:99)">
+                            <span id="dlv-mode-text">🖥️ Physical</span>
+                        </button>
+                        <button id="dlv-pip-btn" class="dlv-btn" title="Open Floating Picture-in-Picture Always-on-Top HUD">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><rect x="11" y="9" width="9" height="6" rx="1" ry="1" fill="currentColor"></rect></svg>
+                        </button>
+                        <button id="dlv-stop-btn" class="dlv-btn dlv-btn-danger" title="Emergency Stop Desktop Pilot (Esc)">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"></rect></svg>
+                            <span>Stop</span>
+                        </button>
+                        <button id="dlv-expand-btn" class="dlv-btn" title="Toggle Fullscreen Preview">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+                        </button>
+                        <button id="dlv-close-btn" class="dlv-btn" title="Minimize / Hide Preview">&times;</button>
+                    </div>
+                </div>
+                <div class="dlv-body">
+                    <div class="dlv-screen-container" id="dlv-screen-click" title="Click anywhere on the preview to manually send a click">
+                        <img id="dlv-screen-img" src="" alt="Live Desktop View" />
+                        <div id="dlv-placeholder" class="dlv-placeholder">Capturing Desktop Screen...</div>
+                    </div>
+                    <div class="dlv-status-bar">
+                        <div class="dlv-thought-row">
+                            <span class="dlv-label">Thought:</span>
+                            <span id="dlv-thought" class="dlv-thought">Waiting for pilot commands...</span>
+                        </div>
+                        <div class="dlv-action-row">
+                            <span class="dlv-label">Action:</span>
+                            <span id="dlv-action" class="dlv-action">Idle</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Messages Container -->
+            <div id="messages-container" class="messages-container">
+                <div class="welcome-hero">
+                    <div class="hero-logo">/</div>
+                    <h2>Uncensored Grok Local</h2>
+                    <p>Truthful, candid, and direct. Retains biographical facts and secrets forever, even within low-context limits.</p>
+                    <div class="hero-suggestions">
+                        <button class="suggestion-chip" data-prompt="Let's be completely candid. What do you think about people giving up on their lifelong dreams?">"What do you think about giving up on dreams?"</button>
+                        <button class="suggestion-chip" data-prompt="My name is Asin, 21. What are your core thoughts on brutal honesty vs comforting lies?">"My name is Asin. Honest thoughts on brutal honesty?"</button>
+                        <button class="suggestion-chip" data-prompt="Roast me playfully, but tell me one genuinely truthful piece of advice for dealing with parental pressure.">"Roast me, but give real advice on parents."</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chat Input Area -->
+            <div class="input-container">
+                <!-- Image Attachment Preview -->
+                <div id="image-preview-container" class="image-preview-container hidden">
+                    <div class="image-preview-card">
+                        <img id="image-preview-thumb" src="" alt="Attached image preview">
+                        <div class="image-preview-details">
+                            <span id="image-preview-name" class="image-preview-name">image.png</span>
+                            <span class="image-preview-tag">Attached Image</span>
+                        </div>
+                        <button type="button" id="remove-image-btn" class="remove-image-btn" title="Remove image">&times;</button>
+                    </div>
+                </div>
+
+                <form id="chat-form" class="chat-form">
+                    <input type="file" id="image-file-input" accept="image/png, image/jpeg, image/jpg, image/webp" style="display: none;">
+                    <button type="button" id="attach-btn" class="attach-btn" title="Attach image / diagram (or paste with Ctrl+V)">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                        </svg>
+                    </button>
+                    <textarea 
+                        id="chat-input" 
+                        placeholder="Ask Grok anything or paste image with Ctrl+V (no filters, 100% candid)..." 
+                        rows="1"
+                        autocomplete="off"
+                    ></textarea>
+                    <button type="submit" id="send-btn" class="send-btn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                    </button>
+                </form>
+                <div class="input-hint">
+                    Dolphin 3.0 Llama 3.1 8B • Uncensored Vision Active • Multi-Tier Memory Active
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Memory Dossier Drawer / Modal -->
+    <div id="memory-drawer" class="drawer-overlay hidden">
+        <div class="drawer">
+            <div class="drawer-header">
+                <div class="drawer-title">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+                    <h3>Grok Memory Inspector</h3>
+                </div>
+                <button id="close-memory-btn" class="btn-close">&times;</button>
+            </div>
+
+            <div class="drawer-tabs">
+                <button class="drawer-tab active" data-tab="dossier">User Dossier (Tier 1)</button>
+                <button class="drawer-tab" data-tab="episodic">Episodic Archive (Tier 2)</button>
+            </div>
+
+            <div class="drawer-body">
+                <!-- Tab: Dossier -->
+                <div id="tab-dossier" class="tab-pane active">
+                    <p class="tab-desc">These are facts Grok has learned about you across all conversations. They are injected permanently into prompt memory.</p>
+                    
+                    <form id="add-fact-form" class="add-fact-form">
+                        <input type="text" id="fact-key" placeholder="Key (e.g. name, goal, secret)" required>
+                        <input type="text" id="fact-value" placeholder="Value (e.g. Asin, Doctor)" required>
+                        <select id="fact-category">
+                            <option value="identity">Identity</option>
+                            <option value="career">Career / Goals</option>
+                            <option value="experiences">Experiences</option>
+                            <option value="relationships">Relationships</option>
+                            <option value="secrets">Secrets</option>
+                            <option value="general">General</option>
+                        </select>
+                        <button type="submit" class="btn btn-primary btn-sm">Add Fact</button>
+                    </form>
+
+                    <div id="dossier-list" class="dossier-grid">
+                        <!-- Loaded dynamically -->
+                    </div>
+                </div>
+
+                <!-- Tab: Episodic -->
+                <div id="tab-episodic" class="tab-pane">
+                    <p class="tab-desc">Episodic memories and highlights retrieved via hybrid semantic search.</p>
+                    <div class="search-box">
+                        <input type="text" id="episodic-search-input" placeholder="Search past memories...">
+                        <button id="episodic-search-btn" class="btn btn-secondary btn-sm">Search</button>
+                    </div>
+                    <div id="episodic-list" class="episodic-list">
+                        <!-- Loaded dynamically -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ChatGPT / OpenAI API Key Modal -->
+    <div id="api-key-modal" class="drawer-overlay centered hidden">
+        <div class="key-modal">
+            <div class="drawer-header">
+                <div class="drawer-title">
+                    <span style="font-size: 18px;">🔑</span>
+                    <h3>ChatGPT API Key</h3>
+                </div>
+                <button id="close-key-modal-btn" class="btn-close">&times;</button>
+            </div>
+            <div class="key-modal-body">
+                <div id="openai-key-status" class="key-status-line">Checking…</div>
+
+                <label class="key-field-label" for="openai-key-input">OpenAI API Key</label>
+                <input type="password" id="openai-key-input" class="key-field-input" placeholder="sk-..." autocomplete="off">
+
+                <label class="key-field-label" for="openai-base-url-input">API Base URL (optional)</label>
+                <input type="text" id="openai-base-url-input" class="key-field-input" placeholder="https://api.openai.com/v1" autocomplete="off">
+
+                <div id="openai-key-error" class="key-error hidden"></div>
+
+                <div class="key-actions">
+                    <button id="save-openai-key-btn" class="btn btn-primary btn-sm">Save &amp; Validate</button>
+                    <button id="delete-openai-key-btn" class="btn btn-secondary btn-sm">Remove Key</button>
+                </div>
+
+                <p class="key-hint">
+                    Paste your ChatGPT API key to unlock the ☁️ models in the model picker.
+                    The key is stored locally at <code>data/openai_key.json</code> (chmod 600), or set the
+                    <code>OPENAI_API_KEY</code> environment variable instead. The 4-tier memory, personas,
+                    vision, and desktop pilot all work in cloud mode.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
