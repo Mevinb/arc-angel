@@ -58,6 +58,115 @@ def prepare_screenshot_for_llm(shot_path: str, max_dim: int = 1024, quality: int
             return None
 
 
+def compute_screen_delta(
+    shot_a: Optional[str],
+    shot_b: Optional[str],
+    ocr_a: Optional[set],
+    ocr_b: Optional[set]
+) -> float:
+    """
+    Computes screen difference delta between 0.0 (identical) and 1.0 (completely changed).
+    Combines OCR text Jaccard difference and downscaled pixel comparison.
+    """
+    ocr_delta = 1.0
+    if ocr_a is not None and ocr_b is not None:
+        if not ocr_a and not ocr_b:
+            ocr_delta = 0.0
+        else:
+            intersection = len(ocr_a & ocr_b)
+            union = len(ocr_a | ocr_b)
+            ocr_delta = 1.0 - (intersection / max(union, 1))
+
+    pixel_delta = 1.0
+    if shot_a and shot_b and os.path.exists(shot_a) and os.path.exists(shot_b):
+        try:
+            with Image.open(shot_a) as img_a, Image.open(shot_b) as img_b:
+                small_a = img_a.convert("L").resize((64, 64), Image.Resampling.BOX)
+                small_b = img_b.convert("L").resize((64, 64), Image.Resampling.BOX)
+                diff = sum(abs(p1 - p2) for p1, p2 in zip(small_a.getdata(), small_b.getdata()))
+                pixel_delta = diff / (64 * 64 * 255.0)
+        except Exception:
+            pixel_delta = ocr_delta
+
+    if ocr_a is not None and shot_a and os.path.exists(shot_a):
+        return (ocr_delta + pixel_delta) / 2.0
+    elif ocr_a is not None:
+        return ocr_delta
+    return pixel_delta
+
+
+def get_action_signature(action_str: str) -> str:
+    """Extracts a normalized signature for action target comparison (e.g. click coordinates or text)."""
+    clean = action_str.strip().lower()
+    # click(x, y), double_click(x, y), right_click(x, y)
+    m = re.match(r"(?:click|double_click|right_click)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", clean)
+    if m:
+        return f"coord:{m.group(1)},{m.group(2)}"
+    # type_into(x, y, ...)
+    m = re.match(r"type_into\s*\(\s*(\d+)\s*,\s*(\d+)", clean)
+    if m:
+        return f"coord:{m.group(1)},{m.group(2)}"
+    # click_text("...")
+    m = re.match(r"click_text\s*\(\s*[\"'](.*?)[\"']", clean)
+    if m:
+        return f"text:{m.group(1).strip()}"
+    # click_id(id)
+    m = re.match(r"click_id\s*\(\s*(\d+)", clean)
+    if m:
+        return f"id:{m.group(1)}"
+    # type_text("...")
+    m = re.match(r"type_text\s*\(\s*[\"'](.*?)[\"']", clean)
+    if m:
+        return f"type:{m.group(1).strip()}"
+    return clean
+
+
+def parse_type_into_args(args_str: str) -> Optional[Dict[str, Any]]:
+    """
+    Parses arguments for type_into call. Supports:
+    - (x, y, text, submit=True|False)
+    - (x, y, text) [default submit=True]
+    - (id, text, submit=True|False)
+    - (text, submit=True|False)
+    """
+    raw = args_str.strip()
+    submit = True
+    if re.search(r"submit\s*=\s*(false|0)", raw, re.IGNORECASE):
+        submit = False
+    elif re.search(r"submit\s*=\s*(true|1)", raw, re.IGNORECASE):
+        submit = True
+    elif re.search(r",\s*false\s*$", raw, re.IGNORECASE):
+        submit = False
+
+    # Check for x, y coordinates
+    m_xy = re.match(r"^(\d+)\s*,\s*(\d+)\s*,\s*[\"'](.*)", raw, re.DOTALL)
+    if m_xy:
+        x, y = int(m_xy.group(1)), int(m_xy.group(2))
+        rest = m_xy.group(3)
+        text_m = re.match(r"^(.*?)(?:[\"']\s*(?:,\s*(?:submit\s*=\s*)?(?:True|False))?\s*)$", rest, re.DOTALL | re.IGNORECASE)
+        text = text_m.group(1) if text_m else rest.rstrip("\"'). ")
+        return {"type": "xy", "x": x, "y": y, "text": text, "submit": submit}
+
+    # Check for id, text
+    m_id = re.match(r"^(\d+)\s*,\s*[\"'](.*)", raw, re.DOTALL)
+    if m_id:
+        idx = int(m_id.group(1))
+        rest = m_id.group(2)
+        text_m = re.match(r"^(.*?)(?:[\"']\s*(?:,\s*(?:submit\s*=\s*)?(?:True|False))?\s*)$", rest, re.DOTALL | re.IGNORECASE)
+        text = text_m.group(1) if text_m else rest.rstrip("\"'). ")
+        return {"type": "id", "id": idx, "text": text, "submit": submit}
+
+    # Text only
+    m_txt = re.match(r"^[\"'](.*)", raw, re.DOTALL)
+    if m_txt:
+        rest = m_txt.group(1)
+        text_m = re.match(r"^(.*?)(?:[\"']\s*(?:,\s*(?:submit\s*=\s*)?(?:True|False))?\s*)$", rest, re.DOTALL | re.IGNORECASE)
+        text = text_m.group(1) if text_m else rest.rstrip("\"'). ")
+        return {"type": "text", "text": text, "submit": submit}
+
+    return None
+
+
 KNOWN_ACTIONS_REGEX = re.compile(
     r"\b(launch_app|open_url|navigate_browser|click_id|click_text|click|double_click|right_click|type_into|type_text|paste_text|copy_selection|press_key|scroll|wait|finish)\s*\([^)]*\)",
     re.IGNORECASE
@@ -167,18 +276,19 @@ Available Tools:
 1. open_url("url_or_query", browser="...", profile="...") - Directly opens browser to any URL or Google search query in 1 fast step (e.g. open_url("https://github.com", profile="mevinbenty") or open_url("weather in tokyo")). PREFERRED for web browsing!
 2. launch_app("app_name", profile="...") - Launch an application (e.g. launch_app("chrome", profile="mevinbenty") or launch_app("brave") or launch_app("nautilus")).
 3. navigate_browser("url_or_query") - In an already-open browser window, automatically focuses the address bar (Ctrl+L), types the URL/query, and presses Enter.
-4. click(x, y) - Move the mouse cursor to absolute coordinate (x, y) and left-click.
-5. double_click(x, y) - Move to (x, y) and double-click.
-6. right_click(x, y) - Move to (x, y) and right-click (open context menu).
-7. click_text("text") - Search for matching text on screen and click it.
-8. click_id(id) - Click element by its index ID from the screen state.
-9. type_text("string") - Type text using keyboard into the currently focused window or field.
-10. paste_text("string") - Paste text directly into the focused field via clipboard (faster for long strings).
-11. copy_selection() - Copy current selection (Ctrl+C) and inspect clipboard text.
-12. press_key("key_combo") - Press a key or shortcut (e.g. "enter", "ctrl+l", "ctrl+t", "ctrl+w", "alt+tab", "super", "backspace", "escape").
-13. scroll("up" | "down") - Scroll page up or down.
-14. wait(seconds) - Pause for seconds to let a page or app load (e.g. wait(2)).
-15. finish("summary") - The goal has been successfully accomplished.
+4. type_into(x, y, "text", submit=True) - Combined click, clear, type/paste, and submit tool. Moves cursor to (x, y), clicks to focus, clears field, types text, and presses Enter if submit is True (default True). ALWAYS use this for text inputs, prompt bars, and search fields!
+5. click(x, y) - Move the mouse cursor to absolute coordinate (x, y) and left-click.
+6. double_click(x, y) - Move to (x, y) and double-click.
+7. right_click(x, y) - Move to (x, y) and right-click (open context menu).
+8. click_text("text") - Search for matching text on screen and click it.
+9. click_id(id) - Click element by its index ID from the screen state.
+10. type_text("string") - Type text using keyboard into the currently focused window or field.
+11. paste_text("string") - Paste text directly into the focused field via clipboard (faster for long strings).
+12. copy_selection() - Copy current selection (Ctrl+C) and inspect clipboard text.
+13. press_key("key_combo") - Press a key or shortcut (e.g. "enter", "ctrl+l", "ctrl+t", "ctrl+w", "alt+tab", "super", "backspace", "escape", "tab").
+14. scroll("up" | "down") - Scroll page up or down.
+15. wait(seconds) - Pause for seconds to let a page or app load (e.g. wait(2)).
+16. finish("summary") - The goal has been successfully accomplished.
 
 CRITICAL OPERATIONAL RULES:
 1. APP LAUNCHING RULE:
@@ -186,37 +296,45 @@ CRITICAL OPERATIONAL RULES:
    Action: launch_app("<app_name>")
    NEVER click random desktop icons, taskbars, or type text before the requested application is opened!
 
-2. INTERMEDIATE BLOCKERS & PROFILE SELECTORS:
+2. TEXT INPUT & CHATGPT RULES:
+   When interacting with prompt bars, chat inputs, login fields, or search boxes, ALWAYS use type_into(x, y, 'text', submit=True) or type_into(x, y, 'text'). NEVER rely on bare click(x, y) or click_text() followed by separate typing steps.
+   When interacting with ChatGPT (chatgpt.com) or other web chat apps:
+   - ChatGPT's input is a prompt textarea near the bottom center (often labeled 'Ask anything' or 'Message ChatGPT'). ALWAYS use type_into(x, y, 'your message', submit=True).
+   - If clicking coordinates does not activate or type into the input, DO NOT repeat the exact same click! Target visible button text (e.g. click_text('Ask anything')) or use keyboard shortcuts: press_key('tab') to cycle focus into the input box or press_key('enter').
+   - If pressing Enter produces a newline instead of submitting, click the visible Send button (arrow icon next to the input) or send press_key('ctrl+enter').
+   - NEVER repeat an identical click or action if the screen state has not changed!
+
+3. INTERMEDIATE BLOCKERS & PROFILE SELECTORS:
    If an unexpected modal, "Who's using Brave?", "Who's using Chrome?" profile picker, cookie banner, or dialog appears after launching an app, you MUST interact with it first before attempting navigate_browser again. Click your profile name (e.g. click_text("Person 1") or click(x, y) on the avatar) or use press_key("enter") to enter the browser.
 
-3. BROWSER NAVIGATION RULE (Brave, Chrome, Firefox):
+4. BROWSER NAVIGATION RULE (Brave, Chrome, Firefox):
    Once the browser window is open and unobstructed, to search or navigate, ALWAYS prefer:
    Action: navigate_browser("<query_or_url>")
    Alternatively: press_key("ctrl+l") to focus address bar, then type_text("<query>"), then press_key("enter").
 
-4. NEVER TRUST ACTION HISTORY ALONE & VERIFICATION RULE:
+5. NEVER TRUST ACTION HISTORY ALONE & VERIFICATION RULE:
    Do NOT call finish() just because a previous step says navigate_browser or click was executed. You MUST verify in the Current Screen State (and screenshot) that the final goal state is actually visible on screen (e.g. actual search results for the query or target page content are visible). If a modal blocked your action or the page is still loading, wait or resolve the blocker.
 
-5. DESKTOP APPS RULE:
+6. DESKTOP APPS RULE:
    For Calculator, Files, or Settings: look at the exact labels in "Current Screen State" and click the target with click_text("<label>") or click(x, y).
 
-6. COMPLETION RULE:
+7. COMPLETION RULE:
    Only after visually/OCR verifying in Current Screen State that the goal is visibly accomplished, call finish("<summary of what was achieved>").
 
-7. NEVER CLICK OR INTERACT WITH GROK CHAT WINDOW:
+8. NEVER CLICK OR INTERACT WITH GROK CHAT WINDOW:
    Under NO circumstances should you click or interact with the GROK web application interface itself (identifiable by "GROK // Local Uncensored", "localhost:8000", "127.0.0.1:8000", or GROK control panels like "Stop Pilot"). If GROK is visible on screen, do NOT type in its address bar or click its buttons. Always call launch_app("<target_app>") to open and focus your destination application.
 
-8. DIRECT ACTION FORMAT RULE (NO THINKING TAGS):
+9. DIRECT ACTION FORMAT RULE (NO THINKING TAGS):
    Do NOT output <think>...</think> tags or conversational preamble. Immediately output:
    Thought: <1-2 sentences reasoning about what you see on screen and choosing the next step>
-   Action: <single tool call, e.g. launch_app("brave") or click(450, 80) or finish("Done")>
+   Action: <single tool call, e.g. launch_app("brave") or type_into(450, 800, "hello", submit=True) or finish("Done")>
 
-9. LOGGED-IN PROFILES RULE:
+10. LOGGED-IN PROFILES RULE:
    ALWAYS prefer the user's logged-in browser and profile via open_url(url, browser="...", profile="...") or launch_app("...", profile="..."). If the user mentions an account, profile, or username (e.g. 'mevinbenty'), specify profile="mevinbenty". If no profile is specified, use the primary active logged-in profile listed in Available Logged-In Browser Profiles.
 
 Respond STRICTLY in this format:
 Thought: <1-2 sentences reasoning about what you see on screen and choosing the next step>
-Action: <single tool call, e.g. launch_app("brave") or navigate_browser("cats") or click(450, 80) or finish("Done")>"""
+Action: <single tool call, e.g. launch_app("brave") or type_into(450, 800, "cats", submit=True) or finish("Done")>"""
 
 
 class DesktopAgent:
@@ -382,7 +500,11 @@ class DesktopAgent:
         step = 1
         history_log: List[str] = []
         prev_ocr_set: Optional[set] = None
+        prev_shot_path: Optional[str] = None
         prev_action_str: str = ""
+        consecutive_stalls: int = 0
+        last_stalled_signature: str = ""
+        loop_breaker_interrupt: str = ""
 
         # Determine if active model supports native vision
         has_vision = getattr(self.llm_client, "has_vision", False)
@@ -407,20 +529,22 @@ class DesktopAgent:
                 # Track normalized OCR text set to measure screen delta
                 current_ocr_set = {el["text"].strip().lower() for el in raw_elements if el.get("text", "").strip()}
 
-                # Measure screen delta: warn if last action was an interactive command but screen didn't change (>90% identical)
+                # Measure screen delta: warn if last action was an interactive command but screen delta < 2%
                 stalled_warning = ""
+                is_stalled = False
                 if prev_ocr_set is not None and prev_action_str:
                     act_lower = prev_action_str.lower()
                     interactive = any(k in act_lower for k in [
-                        "navigate_browser", "click", "click_text", "type_text", "press_key", "launch_app"
+                        "navigate_browser", "click", "click_text", "click_id", "type_into", "type_text", "paste_text", "press_key", "launch_app"
                     ])
-                    if interactive and (current_ocr_set or prev_ocr_set):
-                        overlap = len(prev_ocr_set & current_ocr_set) / max(len(prev_ocr_set | current_ocr_set), 1)
-                        if overlap > 0.90:
+                    if interactive:
+                        screen_delta = compute_screen_delta(prev_shot_path, current_shot, prev_ocr_set, current_ocr_set)
+                        if screen_delta < 0.02:
+                            is_stalled = True
                             stalled_warning = (
-                                "WARNING: The screen did not change after your last action. "
-                                "Your previous action likely had no effect because a modal, "
-                                "profile picker, or unfocused window is blocking it.\n\n"
+                                "WARNING: The screen did not change after your last action / has not updated after clicking or typing at those coordinates. "
+                                "The app window may lack focus or the exact coordinates did not trigger the field. "
+                                "You must use a different coordinate, hit a broader target, scroll, or try an alternative approach.\n\n"
                             )
 
                 # Prepare screenshot data URI for vision models (downscaled to max 1024px JPEG)
@@ -457,9 +581,12 @@ class DesktopAgent:
                 if dossier_hint:
                     system_content += f"\n\n{dossier_hint}"
 
+                interrupt_prefix = loop_breaker_interrupt
+                loop_breaker_interrupt = ""  # Reset after consuming for prompt
+
                 user_prompt = f"""Goal: {goal}
 
-{stalled_warning}{vision_hint}Current Screen State:
+{interrupt_prefix}{stalled_warning}{vision_hint}Current Screen State:
 {elements_text}
 
 Recent Steps Taken:
@@ -508,7 +635,7 @@ What is your next action?"""
                     )
                     retry_user_prompt = f"""Goal: {goal}
 
-{stalled_warning}Current Screen State:
+{interrupt_prefix}{stalled_warning}Current Screen State:
 {elements_text}
 
 Recent Steps Taken:
@@ -562,11 +689,58 @@ What is your next action?"""
                     self.is_running = False
                     break
 
+                # Loop Breaker Check: if the same coordinate/action is targeted 2 times consecutively without state modification
+                curr_sig = get_action_signature(action_str)
+                prev_sig = get_action_signature(prev_action_str) if prev_action_str else ""
+                is_repeat = (curr_sig == prev_sig) or bool(last_stalled_signature and curr_sig == last_stalled_signature)
+
+                if is_stalled and is_repeat:
+                    consecutive_stalls += 1
+                elif is_stalled:
+                    consecutive_stalls = 1
+                else:
+                    consecutive_stalls = 0
+
+                last_stalled_signature = curr_sig if is_stalled else ""
+
+                if consecutive_stalls >= 2:
+                    logger.warning(
+                        "Step %d: Loop breaker triggered on signature %s (stalls=%d). Rejecting duplicate action and forcing pivot.",
+                        step, curr_sig, consecutive_stalls
+                    )
+                    loop_breaker_interrupt = (
+                        f"LOOP BREAKER INTERRUPT: You targeted the exact same coordinates or action ('{action_str}') 2 times consecutively without any screen update. "
+                        "You are FORBIDDEN from repeating this action. Pivot now: use keyboard shortcuts (press_key('tab') or press_key('enter')), focus the window, use type_into with submit=True, or click a visible text element.\n\n"
+                    )
+                    # Attempt active window focus recovery
+                    try:
+                        self.controller.focus_window()
+                    except Exception:
+                        pass
+
+                    detail_msg = f"Rejected duplicate action '{action_str}': Loop breaker triggered. Pivoting agent strategy."
+                    history_log.append(f"Step {step}: {action_str} -> {detail_msg}")
+                    yield {
+                        "step": step,
+                        "thought": f"Stuck click/focus loop detected on '{action_str}'. Intercepting and pivoting strategy.",
+                        "action": "loop_breaker_pivot",
+                        "detail": detail_msg,
+                        "screenshot_url": shot_rel_url,
+                        "status": "running"
+                    }
+                    prev_ocr_set = current_ocr_set
+                    prev_shot_path = current_shot
+                    prev_action_str = action_str
+                    step += 1
+                    await asyncio.sleep(0.5)
+                    continue
+
                 # 4. Execute the parsed tool action(s)
                 detail_msg, is_finished = await self._execute_action(action_str, raw_elements)
 
                 # Record state for delta comparison in next step
                 prev_ocr_set = current_ocr_set
+                prev_shot_path = current_shot
                 prev_action_str = action_str
 
                 history_log.append(f"Step {step}: {action_str} -> {detail_msg}")
@@ -795,35 +969,42 @@ What is your next action?"""
                 return f"Found '{best_el['text']}' at ({cx}, {cy}). Moved cursor and clicked.", False
             return f"Element '{target_text}' not found on screen.", False
 
-        # type_into(x, y, "text") or type_into(id, "text") or type_into("text")
-        m_xy = re.match(r"type_into\((\d+),\s*(\d+),\s*[\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
-        if m_xy:
-            x, y, text = int(m_xy.group(1)), int(m_xy.group(2)), m_xy.group(3)
-            self.controller.click(x, y)
-            await asyncio.sleep(0.2)
-            self.controller.type_text(text)
-            await asyncio.sleep(0.3)
-            return f"Clicked ({x}, {y}) and typed '{text}'.", False
-
-        m_id = re.match(r"type_into\((\d+),\s*[\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
-        if m_id:
-            idx, text = int(m_id.group(1)), m_id.group(2)
-            elements = getattr(self, "_current_step_elements", None) or raw_elements
-            if 0 <= idx < len(elements):
-                target_el = elements[idx]
-                cx, cy = target_el.get("cx", target_el.get("x", 0)), target_el.get("cy", target_el.get("y", 0))
-                self.controller.click(cx, cy)
-                await asyncio.sleep(0.2)
-            self.controller.type_text(text)
-            await asyncio.sleep(0.3)
-            return f"Typed '{text}'.", False
-
-        m_text = re.match(r"type_into\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
-        if m_text:
-            text = m_text.group(1)
-            self.controller.type_text(text)
-            await asyncio.sleep(0.3)
-            return f"Typed '{text}'.", False
+        # type_into(...)
+        if action_clean.lower().startswith("type_into("):
+            m_all = re.match(r"type_into\s*\((.*)\)", action_clean, re.IGNORECASE | re.DOTALL)
+            if m_all:
+                parsed = parse_type_into_args(m_all.group(1))
+                if parsed:
+                    p_type = parsed["type"]
+                    submit = parsed["submit"]
+                    text = parsed["text"]
+                    sub_str = " and pressed Enter" if submit else ""
+                    if p_type == "xy":
+                        x, y = parsed["x"], parsed["y"]
+                        self.controller.type_into(x, y, text, submit=submit)
+                        await asyncio.sleep(0.5)
+                        return f"Focused ({x}, {y}), typed '{text}'{sub_str}.", False
+                    elif p_type == "id":
+                        idx = parsed["id"]
+                        elements = getattr(self, "_current_step_elements", None) or raw_elements
+                        if 0 <= idx < len(elements):
+                            target_el = elements[idx]
+                            cx, cy = target_el.get("cx", target_el.get("x", 0)), target_el.get("cy", target_el.get("y", 0))
+                            self.controller.type_into(cx, cy, text, submit=submit)
+                            await asyncio.sleep(0.5)
+                            return f"Focused element [{idx}] '{target_el.get('text', '')}' at ({cx}, {cy}), typed '{text}'{sub_str}.", False
+                        else:
+                            self.controller.type_text(text)
+                            if submit:
+                                await asyncio.sleep(0.2)
+                                self.controller.press_key("enter")
+                            return f"Typed '{text}'{sub_str} (element [{idx}] out of range).", False
+                    elif p_type == "text":
+                        self.controller.type_text(text)
+                        if submit:
+                            await asyncio.sleep(0.2)
+                            self.controller.press_key("enter")
+                        return f"Typed '{text}'{sub_str}.", False
 
         # type_text(text)
         m = re.match(r"type_text\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)

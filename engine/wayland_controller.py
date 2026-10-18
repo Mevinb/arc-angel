@@ -453,6 +453,26 @@ class WaylandController:
                 self.keysym(sym, False)
                 time.sleep(0.01)
 
+    def type_into(self, x: float, y: float, text: str, submit: bool = True) -> None:
+        """
+        Combines focusing a field, clearing existing content, typing new text, and optionally submitting.
+        1. Clicks (x, y) to establish keyboard focus.
+        2. Waits 300ms for input focus state to settle.
+        3. Sends Ctrl+A then Backspace to clear placeholder or stale text.
+        4. Types/pastes text (uses paste_text clipboard bridge if text > 15 chars).
+        5. If submit is True, waits 200ms and presses Enter.
+        """
+        self.click(x, y)
+        time.sleep(0.3)
+        self.press_key("ctrl+a")
+        time.sleep(0.05)
+        self.press_key("backspace")
+        time.sleep(0.1)
+        self.type_text(text)
+        if submit:
+            time.sleep(0.2)
+            self.press_key("enter")
+
     # ========================== Screen Capture ==========================
 
     def capture_screen(self, out_path: Optional[str] = None, include_cursor: bool = True) -> str:
@@ -562,6 +582,74 @@ class WaylandController:
             return "gnome-control-center"
         return command_or_app
 
+    def focus_window(self, app_or_title: Optional[str] = None) -> bool:
+        """
+        Forces active window focus using GNOME Shell or AT-SPI, ensuring key/mouse events register.
+        1. Tries GNOME Shell Eval D-Bus activation.
+        2. Tries AT-SPI accessible window discovery and focus.
+        3. Falls back to clicking top-center header bar of the foremost window.
+        """
+        # 1. Try GNOME Shell Eval
+        try:
+            res = subprocess.run([
+                "gdbus", "call", "--session", "--dest", "org.gnome.Shell",
+                "--object-path", "/org/gnome/Shell",
+                "--method", "org.gnome.Shell.Eval",
+                "global.display.get_focus_window().activate(global.get_current_time());"
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1, text=True, check=False)
+            if res.returncode == 0 and "true" in res.stdout.lower():
+                return True
+        except Exception:
+            pass
+
+        # 2. Try AT-SPI accessible window discovery and focus
+        try:
+            import gi
+            gi.require_version("Atspi", "2.0")
+            from gi.repository import Atspi
+            desktop = Atspi.get_desktop(0)
+            target_kw = (app_or_title or "").lower().strip()
+            
+            for i in range(desktop.get_child_count()):
+                app = desktop.get_child_at_index(i)
+                if not app:
+                    continue
+                app_name = (app.get_name() or "").lower()
+                matches = not target_kw or (target_kw in app_name) or any(k in app_name for k in ["brave", "chrome", "chromium", "firefox", "calculator", "nautilus", "files"])
+                if matches:
+                    for j in range(app.get_child_count()):
+                        win = app.get_child_at_index(j)
+                        if not win:
+                            continue
+                        states = win.get_state_set()
+                        if states.contains(Atspi.StateType.SHOWING) or states.contains(Atspi.StateType.VISIBLE):
+                            comp = win.get_component_iface()
+                            if comp:
+                                try:
+                                    if comp.grab_focus():
+                                        return True
+                                except Exception:
+                                    pass
+                                bbox = comp.get_extents(Atspi.CoordType.SCREEN)
+                                if bbox.width > 100 and bbox.height > 100:
+                                    # Click top bar / header to bring window to front
+                                    hx = max(10, bbox.x + min(200, bbox.width // 2))
+                                    hy = max(10, bbox.y + 15)
+                                    self.click(hx, hy)
+                                    time.sleep(0.15)
+                                    return True
+        except Exception as e:
+            logger.debug("AT-SPI window focus attempt: %s", e)
+
+        # 3. Safe fallback: click top-center of desktop bounds
+        try:
+            bounds = self.get_desktop_bounds()
+            self.click(bounds[0] + bounds[2] // 2, bounds[1] + 25)
+            time.sleep(0.1)
+            return True
+        except Exception:
+            return False
+
     @classmethod
     def launch_app(cls, command_or_app: str, wait_seconds: float = 2.5, profile: Optional[str] = None) -> None:
         """Launches an application in the background and waits for the window to render on Wayland."""
@@ -575,6 +663,12 @@ class WaylandController:
         )
         if wait_seconds > 0:
             time.sleep(wait_seconds)
+
+        # Force active window focus
+        try:
+            cls.get_instance().focus_window(command_or_app)
+        except Exception:
+            pass
 
         # Optional split-screen tiling if requested
         if os.getenv("SPLIT_SCREEN_PILOT", "0") == "1":
@@ -620,6 +714,13 @@ class WaylandController:
             start_new_session=True
         )
         time.sleep(2.0)
+
+        # Force active window focus
+        try:
+            cls.get_instance().focus_window(browser or "browser")
+        except Exception:
+            pass
+
         if os.getenv("SPLIT_SCREEN_PILOT", "0") == "1":
             try:
                 cls.get_instance().tile_active_window("right")

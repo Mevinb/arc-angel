@@ -237,6 +237,29 @@ class VirtualDisplayManager:
             check=False
         )
 
+    def type_into(self, x: int, y: int, text: str, submit: bool = True) -> None:
+        """Clicks (x, y), clears text, types/pastes, and optionally submits with Enter on virtual display."""
+        self.ensure_running()
+        self.click(x, y)
+        time.sleep(0.3)
+        self.press_key("ctrl+a")
+        time.sleep(0.05)
+        self.press_key("BackSpace")
+        time.sleep(0.1)
+        self.type_text(text)
+        if submit:
+            time.sleep(0.2)
+            self.press_key("Return")
+
+    def focus_window(self, app_or_title: Optional[str] = None) -> bool:
+        """Focuses active window on virtual display via xdotool."""
+        self.ensure_running()
+        try:
+            subprocess.run(["xdotool", "click", "--display", self.display, "1"], timeout=2, check=False)
+            return True
+        except Exception:
+            return False
+
     def read_clipboard(self) -> str:
         """Reads system clipboard."""
         return read_clipboard()
