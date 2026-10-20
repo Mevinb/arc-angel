@@ -6,7 +6,7 @@ Exposes two entry points:
 - assemble_messages(): structured chat messages (OpenAI / chat-completions APIs)
 - assemble_prompt():   ChatML string for llama.cpp's raw /completion endpoint
 """
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from config import get_memory_budgets
 from persona.prompts import get_system_prompt
 from persona.chatml import format_chatml_prompt, estimate_tokens
@@ -21,7 +21,8 @@ class MemoryOrchestrator:
         cls,
         session_id: str,
         current_user_message: str,
-        mode: str = "classic"
+        mode: str = "classic",
+        exclude_message_id: Optional[int] = None
     ) -> Tuple[List[Dict[str, str]], Dict]:
         """
         Assembles token-budgeted chat messages incorporating all 4 tiers of memory.
@@ -63,7 +64,7 @@ class MemoryOrchestrator:
         max_sliding_budget = budgets["sliding_budget"]
         with db_session() as conn:
             cursor = conn.execute(
-                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                "SELECT id, role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
                 (session_id, budgets["sliding_window_turns"])
             )
             raw_history = [dict(row) for row in cursor.fetchall()]
@@ -72,6 +73,8 @@ class MemoryOrchestrator:
         kept_messages = []
         accumulated_tokens = 0
         for m in raw_history:
+            if exclude_message_id is not None and m.get("id") == exclude_message_id:
+                continue
             m_tokens = estimate_tokens(m["content"])
             if accumulated_tokens + m_tokens > max_sliding_budget and kept_messages:
                 break
@@ -105,7 +108,8 @@ class MemoryOrchestrator:
         cls,
         session_id: str,
         current_user_message: str,
-        mode: str = "classic"
+        mode: str = "classic",
+        exclude_message_id: Optional[int] = None
     ) -> Tuple[str, Dict]:
         """
         Assembles a token-budgeted ChatML prompt incorporating all 4 tiers of memory.
@@ -115,14 +119,15 @@ class MemoryOrchestrator:
         messages, token_breakdown = cls.assemble_messages(
             session_id=session_id,
             current_user_message=current_user_message,
-            mode=mode
+            mode=mode,
+            exclude_message_id=exclude_message_id
         )
         final_prompt = format_chatml_prompt(messages, append_assistant_header=True)
         token_breakdown["total_estimated_tokens"] = estimate_tokens(final_prompt)
         return final_prompt, token_breakdown
 
     @classmethod
-    def post_interaction_tasks(cls, session_id: str, user_msg: str, assistant_msg: str):
+    def post_interaction_tasks(cls, session_id: str, user_msg: str, assistant_msg: str, user_message_id: Optional[int] = None):
         """
         Background maintenance after a message exchange:
         - Extracts facts into User Dossier
@@ -139,7 +144,8 @@ class MemoryOrchestrator:
                 session_id=session_id,
                 content=f"User: {user_msg}\nGrok: {assistant_msg}",
                 summary=summary_hint,
-                tags="dialogue"
+                tags="dialogue",
+                source_message_id=user_message_id
             )
 
         # 3. Compact older turns if window exceeded

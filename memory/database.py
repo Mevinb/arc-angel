@@ -92,6 +92,10 @@ def init_db():
             cursor.execute("ALTER TABLE episodic_memories ADD COLUMN embedding BLOB;")
         except sqlite3.OperationalError:
             pass
+        try:
+            cursor.execute("ALTER TABLE episodic_memories ADD COLUMN source_message_id INTEGER;")
+        except sqlite3.OperationalError:
+            pass
         
         # FTS5 Full-Text Search virtual table for episodic memory
         cursor.execute("""
@@ -173,6 +177,90 @@ def init_db():
         );
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_subgoals_task ON task_subgoals(task_id, idx);")
+
+        # Migrations for orchestrator upgrades and chat UX
+        try:
+            cursor.execute("ALTER TABLE autonomous_tasks ADD COLUMN max_attempts INTEGER DEFAULT 2")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE autonomous_tasks ADD COLUMN result_summary TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE autonomous_tasks ADD COLUMN last_error TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE autonomous_tasks ADD COLUMN last_heartbeat TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE autonomous_tasks ADD COLUMN started_at TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE autonomous_tasks ADD COLUMN finished_at TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE autonomous_tasks ADD COLUMN run_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE task_subgoals ADD COLUMN verification_status TEXT DEFAULT 'pending'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE task_subgoals ADD COLUMN verification_detail TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE task_subgoals ADD COLUMN last_error TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE task_subgoals ADD COLUMN started_at TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE task_subgoals ADD COLUMN finished_at TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS task_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, id);")
+
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN status TEXT DEFAULT 'complete'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN attachment_url TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN attachment_name TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN attachment_type TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN task_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+
 
 # Initialize database on module load
 init_db()

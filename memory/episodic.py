@@ -54,16 +54,16 @@ def cosine_similarity(u: List[float], v: List[float]) -> float:
 
 class EpisodicMemory:
     @staticmethod
-    def add_memory(session_id: str, content: str, summary: str = "", tags: str = "") -> int:
+    def add_memory(session_id: str, content: str, summary: str = "", tags: str = "", source_message_id: Optional[int] = None) -> int:
         """Stores an episodic event/chunk into long-term episodic memory with embedding vector."""
         embed_text = f"{summary}\n{content}".strip() if summary else content.strip()
         embedding_blob = compute_embedding(embed_text)
 
         with db_session() as conn:
             cursor = conn.execute("""
-            INSERT INTO episodic_memories (session_id, content, summary, tags, embedding)
-            VALUES (?, ?, ?, ?, ?);
-            """, (session_id, content.strip(), summary.strip(), tags.strip(), embedding_blob))
+            INSERT INTO episodic_memories (session_id, content, summary, tags, embedding, source_message_id)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """, (session_id, content.strip(), summary.strip(), tags.strip(), embedding_blob, source_message_id))
             return cursor.lastrowid
 
     @classmethod

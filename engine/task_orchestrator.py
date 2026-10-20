@@ -20,6 +20,7 @@ from typing import Optional, Dict, List, Tuple, Any, AsyncGenerator
 from config import WORKSPACES_DIR, get_active_provider, PROVIDER_OPENAI, get_openai_api_key
 from memory.database import db_session
 from engine.workspace_tools import WorkspaceManager
+from engine.vision_verifier import TaskVerifier
 from engine.desktop_agent import DesktopAgent
 from engine.wayland_controller import WaylandController
 from engine.llama_client import LlamaClient
@@ -82,6 +83,7 @@ class TaskOrchestrator:
     """Orchestrates multi-stage, long-horizon autonomous tasks across system & GUI tools."""
 
     _active_tasks: Dict[str, Dict[str, Any]] = {}
+    _current_agents: Dict[str, Any] = {}
 
     def __init__(self, llm_client=None, controller=None):
         self.llm_client = llm_client or LlamaClient()
@@ -162,10 +164,51 @@ class TaskOrchestrator:
         """Lists recent autonomous tasks."""
         with db_session() as conn:
             cursor = conn.execute(
-                "SELECT id, session_id, goal, task_type, workspace_dir, status, total_subgoals, completed_subgoals, created_at FROM autonomous_tasks ORDER BY created_at DESC LIMIT ?",
+                "SELECT id, session_id, goal, task_type, workspace_dir, status, total_subgoals, "
+                "completed_subgoals, created_at, updated_at, result_summary, last_error "
+                "FROM autonomous_tasks ORDER BY created_at DESC LIMIT ?",
                 (limit,)
             )
             return [dict(r) for r in cursor.fetchall()]
+
+    @classmethod
+    def get_events(cls, task_id: str, since_id: int = 0, limit: int = 500) -> List[Dict[str, Any]]:
+        """Returns persisted task events ordered ascending."""
+        with db_session() as conn:
+            cursor = conn.execute(
+                "SELECT id, event_type, payload, created_at FROM task_events "
+                "WHERE task_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
+                (task_id, since_id, limit)
+            )
+            events = []
+            for row in cursor.fetchall():
+                try:
+                    payload = json.loads(row["payload"])
+                except Exception:
+                    payload = {"type": row["event_type"]}
+                payload["id"] = row["id"]
+                events.append(payload)
+            return events
+
+    @classmethod
+    def retry_task(cls, task_id: str) -> bool:
+        """Resets failed/interrupted subgoals and re-queues the task."""
+        with db_session() as conn:
+            row = conn.execute("SELECT id FROM autonomous_tasks WHERE id = ?", (task_id,)).fetchone()
+            if not row:
+                return False
+            conn.execute(
+                "UPDATE task_subgoals SET status = 'pending', attempts = 0, last_error = NULL, "
+                "verification_status = 'pending', verification_detail = NULL, updated_at = CURRENT_TIMESTAMP "
+                "WHERE task_id = ? AND status IN ('failed', 'running', 'interrupted')",
+                (task_id,)
+            )
+            conn.execute(
+                "UPDATE autonomous_tasks SET status = 'queued', last_error = NULL, finished_at = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (task_id,)
+            )
+        return True
 
     @classmethod
     def update_task_status(cls, task_id: str, status: str, completed_subgoals: Optional[int] = None) -> None:
@@ -203,33 +246,61 @@ class TaskOrchestrator:
             )
 
     @classmethod
+    def _get_subgoal(cls, task_id: str, idx: int) -> Optional[Dict[str, Any]]:
+        with db_session() as conn:
+            cursor = conn.execute("SELECT * FROM task_subgoals WHERE task_id = ? AND idx = ?", (task_id, idx))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    @classmethod
     def update_subgoal(
         cls,
         task_id: str,
         idx: int,
         status: str,
-        result_summary: Optional[str] = None
+        result_summary: Optional[str] = None,
+        increment_attempt: bool = False
     ) -> None:
         """Updates single sub-goal status and result in database."""
         with db_session() as conn:
             if result_summary is not None:
-                conn.execute(
-                    """
-                    UPDATE task_subgoals
-                    SET status = ?, result_summary = ?, attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
-                    WHERE task_id = ? AND idx = ?
-                    """,
-                    (status, result_summary, task_id, idx)
-                )
+                if increment_attempt:
+                    conn.execute(
+                        """
+                        UPDATE task_subgoals
+                        SET status = ?, result_summary = ?, attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE task_id = ? AND idx = ?
+                        """,
+                        (status, result_summary, task_id, idx)
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE task_subgoals
+                        SET status = ?, result_summary = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE task_id = ? AND idx = ?
+                        """,
+                        (status, result_summary, task_id, idx)
+                    )
             else:
-                conn.execute(
-                    """
-                    UPDATE task_subgoals
-                    SET status = ?, attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
-                    WHERE task_id = ? AND idx = ?
-                    """,
-                    (status, task_id, idx)
-                )
+                if increment_attempt:
+                    conn.execute(
+                        """
+                        UPDATE task_subgoals
+                        SET status = ?, attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE task_id = ? AND idx = ?
+                        """,
+                        (status, task_id, idx)
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE task_subgoals
+                        SET status = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE task_id = ? AND idx = ?
+                        """,
+                        (status, task_id, idx)
+                    )
 
     @classmethod
     def pause_task(cls, task_id: str) -> bool:
@@ -428,10 +499,12 @@ class TaskOrchestrator:
 
     # ========================== Tier 2: Sub-Goal Worker Loop ==========================
 
-    async def run_task(self, task_id: str) -> AsyncGenerator[Dict[str, Any], None]:
+    async def run_task(self, task_id: str, control=None) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Executes the long-horizon task sub-goal by sub-goal.
         Yields real-time events for UI checklist and live desktop viewer.
+
+        `control` is an optional TaskControl providing pause/resume/abort checkpoints.
         """
         task = self.get_task(task_id)
         if not task:
@@ -441,11 +514,21 @@ class TaskOrchestrator:
         workspace = WorkspaceManager(task["workspace_dir"])
         subgoals = task.get("subgoals", [])
 
+        # Reset any sub-goals left in 'running' state from a previous interrupted run
+        with db_session() as conn:
+            conn.execute(
+                "UPDATE task_subgoals SET status = 'pending', updated_at = CURRENT_TIMESTAMP "
+                "WHERE task_id = ? AND status = 'running'",
+                (task_id,)
+            )
+        web_mode = bool(task.get("use_gui") is False) or os.environ.get("GROK_TASK_MODE", "").lower() == "workspace"
+
         # If plan has not been generated yet, generate it now
         if not subgoals:
             yield {
                 "type": "task_update",
                 "task_id": task_id,
+                "task": self.get_task(task_id) or task,
                 "goal": task["goal"],
                 "status": "planning",
                 "workspace_dir": task["workspace_dir"],
@@ -462,6 +545,7 @@ class TaskOrchestrator:
         yield {
             "type": "task_update",
             "task_id": task_id,
+            "task": self.get_task(task_id) or task,
             "goal": task["goal"],
             "status": "running",
             "workspace_dir": task["workspace_dir"],
@@ -475,21 +559,32 @@ class TaskOrchestrator:
         agent = DesktopAgent(
             llm_client=self.llm_client,
             controller=self.controller,
-            workspace_manager=workspace
+            workspace_manager=workspace,
+            use_gui=not web_mode
         )
+        self._current_agents[task_id] = agent
 
         completed_count = task["completed_subgoals"]
 
         for sg in subgoals:
+            # Checkpoint pause/abort via TaskControl if provided
+            if control is not None:
+                try:
+                    await control.checkpoint()
+                except asyncio.CancelledError:
+                    self.update_task_status(task_id, "aborted")
+                    yield {"type": "task_update", "task_id": task_id, "task": self.get_task(task_id), "status": "aborted", "message": "Task aborted by user."}
+                    return
+
             # Check pause / abort state
             state = self._active_tasks.get(task_id, {})
             if state.get("is_aborted"):
                 self.update_task_status(task_id, "aborted")
-                yield {"type": "task_update", "task_id": task_id, "status": "aborted", "message": "Task aborted by user."}
+                yield {"type": "task_update", "task_id": task_id, "task": self.get_task(task_id), "status": "aborted", "message": "Task aborted by user."}
                 return
 
             while state.get("is_paused"):
-                yield {"type": "task_update", "task_id": task_id, "status": "paused", "message": "Task paused. Waiting to resume..."}
+                yield {"type": "task_update", "task_id": task_id, "task": self.get_task(task_id), "status": "paused", "message": "Task paused. Waiting to resume..."}
                 await asyncio.sleep(2.0)
                 state = self._active_tasks.get(task_id, {})
 
@@ -498,10 +593,12 @@ class TaskOrchestrator:
                 continue
 
             # Mark sub-goal running
-            self.update_subgoal(task_id, idx, "running")
+            self.update_subgoal(task_id, idx, "running", increment_attempt=False)
             yield {
                 "type": "subgoal_update",
                 "task_id": task_id,
+                "task": self.get_task(task_id),
+                "subgoal": self._get_subgoal(task_id, idx) or sg,
                 "subgoal_idx": idx,
                 "title": sg["title"],
                 "status": "running",
@@ -516,33 +613,109 @@ class TaskOrchestrator:
                 f"Reference ground truth: {task.get('reference_image_path') or 'None'}"
             )
 
-            # Execute sub-goal in isolated loop (up to 25 steps per sub-goal)
+            # Execute sub-goal in isolated loop with bounded retries
             subgoal_success = False
             last_detail = ""
+            max_attempts = int(task.get("max_attempts") or 3)
+            for attempt in range(1, max_attempts + 1):
+                if control is not None:
+                    try:
+                        await control.checkpoint()
+                    except asyncio.CancelledError:
+                        self.update_task_status(task_id, "aborted")
+                        yield {"type": "task_update", "task_id": task_id, "task": self.get_task(task_id), "status": "aborted", "message": "Task aborted by user."}
+                        return
 
-            # Check if this sub-goal can be satisfied purely via workspace code tools
-            if sg.get("tool_preference") == "workspace" and not any(k in sg["description"].lower() for k in ["browser", "click", "screen", "web"]):
-                subgoal_success, last_detail = await self._execute_workspace_subgoal(workspace, sg, task)
-            else:
-                async for ev in agent.execute_task(subgoal_goal, max_steps=25):
-                    # Forward desktop steps directly to UI
-                    yield ev
-                    if ev.get("status") == "completed":
-                        subgoal_success = True
-                        last_detail = ev.get("detail", "Sub-goal completed.")
-                    elif ev.get("status") == "error":
-                        last_detail = ev.get("detail", "Sub-goal error.")
+                # Check if this sub-goal can be satisfied purely via workspace code tools
+                if web_mode:
+                    async for ev in agent.execute_workspace_task(subgoal_goal, max_steps=25):
+                        yield ev
+                        if ev.get("status") == "completed":
+                            subgoal_success = True
+                            last_detail = ev.get("detail", "Sub-goal completed.")
+                        elif ev.get("status") == "error":
+                            last_detail = ev.get("detail", "Sub-goal error.")
+                elif sg.get("tool_preference") == "workspace" and not any(k in sg["description"].lower() for k in ["browser", "click", "screen", "web"]):
+                    subgoal_success, last_detail = await self._execute_workspace_subgoal(workspace, sg, task)
+                else:
+                    async for ev in agent.execute_task(subgoal_goal, max_steps=25):
+                        # Forward desktop steps directly to UI
+                        yield ev
+                        if ev.get("status") == "completed":
+                            subgoal_success = True
+                            last_detail = ev.get("detail", "Sub-goal completed.")
+                        elif ev.get("status") == "error":
+                            last_detail = ev.get("detail", "Sub-goal error.")
+
+                if subgoal_success:
+                    break
+                if attempt < max_attempts:
+                    self.update_subgoal(task_id, idx, "running", result_summary=last_detail, increment_attempt=False)
+                    yield {
+                        "type": "subgoal_update",
+                        "task_id": task_id,
+                        "task": self.get_task(task_id),
+                        "subgoal": self._get_subgoal(task_id, idx) or sg,
+                        "subgoal_idx": idx,
+                        "title": sg["title"],
+                        "status": "retrying",
+                        "attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "detail": f"Retrying Sub-goal {idx} (attempt {attempt + 1}/{max_attempts})..."
+                    }
 
             # Specialized Workflow 1: Vision Verification Check for Dataset variations
             if task["task_type"] == "dataset_builder" and "variation" in sg["title"].lower():
                 verification_ok, verify_msg = await self._verify_dataset_variation(task, sg)
                 last_detail += f"\nVision Verification: {verify_msg}"
                 if not verification_ok:
+                    subgoal_success = False
                     logger.warning("Sub-goal %d failed vision verification: %s", idx, verify_msg)
+            elif subgoal_success:
+                # Real, checkable verification of the sub-goal outcome.
+                try:
+                    verifier = TaskVerifier(workspace)
+                    verify_ok, verify_msg = verifier.verify_subgoal(sg, task, last_detail)
+                    verification_status = "verified" if verify_ok else "failed"
+                    with db_session() as conn:
+                        conn.execute(
+                            "UPDATE task_subgoals SET verification_status = ?, verification_detail = ?, updated_at = CURRENT_TIMESTAMP "
+                            "WHERE task_id = ? AND idx = ?",
+                            (verification_status, verify_msg, task_id, idx)
+                        )
+                    last_detail += f"\nVerification: {verify_msg}"
+                    yield {
+                        "type": "subgoal_update",
+                        "task_id": task_id,
+                        "task": self.get_task(task_id),
+                        "subgoal": self._get_subgoal(task_id, idx) or sg,
+                        "subgoal_idx": idx,
+                        "title": sg["title"],
+                        "status": "verifying",
+                        "verification_status": verification_status,
+                        "detail": verify_msg,
+                    }
+                    if not verify_ok:
+                        subgoal_success = False
+                        logger.warning("Sub-goal %d failed verification: %s", idx, verify_msg)
+                except Exception as e:
+                    logger.warning("Verification error for sub-goal %d: %s", idx, e)
 
             # Checkpoint sub-goal status
             final_status = "completed" if subgoal_success else "failed"
-            self.update_subgoal(task_id, idx, final_status, result_summary=last_detail)
+            self.update_subgoal(task_id, idx, final_status, result_summary=last_detail, increment_attempt=True)
+            if not subgoal_success:
+                with db_session() as conn:
+                    conn.execute(
+                        "UPDATE task_subgoals SET last_error = ?, finished_at = CURRENT_TIMESTAMP WHERE task_id = ? AND idx = ?",
+                        (last_detail[-500:], task_id, idx)
+                    )
+            else:
+                with db_session() as conn:
+                    conn.execute(
+                        "UPDATE task_subgoals SET finished_at = CURRENT_TIMESTAMP WHERE task_id = ? AND idx = ?",
+                        (task_id, idx)
+                    )
             
             if subgoal_success:
                 completed_count += 1
@@ -551,6 +724,8 @@ class TaskOrchestrator:
             yield {
                 "type": "subgoal_update",
                 "task_id": task_id,
+                "task": self.get_task(task_id),
+                "subgoal": self._get_subgoal(task_id, idx) or sg,
                 "subgoal_idx": idx,
                 "title": sg["title"],
                 "status": final_status,
@@ -563,16 +738,32 @@ class TaskOrchestrator:
 
         # Final task completion check
         final_task_status = "completed" if completed_count >= total_sg else "partially_completed"
+        final_task = self.get_task(task_id) or task
+        result_lines = []
+        for sg_row in final_task.get("subgoals", []):
+            line = f"- [{sg_row.get('status')}] {sg_row.get('title')}"
+            if sg_row.get("result_summary"):
+                line += f": {sg_row['result_summary']}"
+            result_lines.append(line)
+        result_summary = f"Autonomous task '{task['goal']}' finished ({completed_count}/{total_sg} sub-goals).\n" + "\n".join(result_lines)
+        with db_session() as conn:
+            conn.execute(
+                "UPDATE autonomous_tasks SET result_summary = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (result_summary, task_id)
+            )
         self.update_task_status(task_id, final_task_status, completed_subgoals=completed_count)
         yield {
             "type": "task_update",
             "task_id": task_id,
+            "task": self.get_task(task_id),
             "status": final_task_status,
             "total_subgoals": total_sg,
             "completed_subgoals": completed_count,
             "workspace_dir": task["workspace_dir"],
+            "result_summary": result_summary,
             "message": f"Autonomous task finished ({completed_count}/{total_sg} sub-goals completed). Results ready in workspace."
         }
+        self._current_agents.pop(task_id, None)
 
     async def _execute_workspace_subgoal(
         self,

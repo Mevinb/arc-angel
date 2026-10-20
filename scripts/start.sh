@@ -15,13 +15,13 @@ PYTHON_BIN="${PYTHON_BIN:-}"
 
 # Project venv (created with --system-site-packages so the system PyGObject/GNOME
 # desktop automation and system Pillow are visible to the app)
-if [ -z "$PYTHON_BIN" ] && [ -x "$DIR/.venv/bin/python" ] && "$DIR/.venv/bin/python" -c "import fastapi, uvicorn, httpx" >/dev/null 2>&1; then
+if [ -z "$PYTHON_BIN" ] && [ -x "$DIR/.venv/bin/python" ] && "$DIR/.venv/bin/python" -c "import fastapi, uvicorn, httpx, cryptography" >/dev/null 2>&1; then
     PYTHON_BIN="$DIR/.venv/bin/python"
 fi
 
 if [ -z "$PYTHON_BIN" ]; then
     for cand in python3.12 python3.13 python3; do
-        if command -v "$cand" >/dev/null 2>&1 && "$cand" -c "import fastapi, uvicorn, httpx" >/dev/null 2>&1; then
+        if command -v "$cand" >/dev/null 2>&1 && "$cand" -c "import fastapi, uvicorn, httpx, cryptography" >/dev/null 2>&1; then
             PYTHON_BIN="$cand"
             break
         fi
@@ -30,17 +30,17 @@ fi
 
 # Auto-provision the venv with uv when no usable interpreter was found
 if [ -z "$PYTHON_BIN" ] && command -v uv >/dev/null 2>&1; then
-    echo "[*] No Python with fastapi/uvicorn/httpx found — provisioning .venv with uv..."
+    echo "[*] No Python with fastapi/uvicorn/httpx/cryptography found — provisioning .venv with uv..."
     if uv venv --python python3 --system-site-packages "$DIR/.venv" >/dev/null 2>&1 \
-        && uv pip install --python "$DIR/.venv/bin/python" --quiet fastapi uvicorn httpx >/dev/null 2>&1; then
+        && uv pip install --python "$DIR/.venv/bin/python" --quiet fastapi uvicorn httpx cryptography pydantic pillow >/dev/null 2>&1; then
         PYTHON_BIN="$DIR/.venv/bin/python"
     fi
 fi
 
 if [ -z "$PYTHON_BIN" ]; then
-    echo "[-] Error: no Python with fastapi/uvicorn/httpx found."
+    echo "[-] Error: no Python with fastapi/uvicorn/httpx/cryptography found."
     echo "    Option A (recommended, also enables the Desktop Pilot):"
-    echo "        uv venv --system-site-packages .venv && uv pip install --python .venv/bin/python fastapi uvicorn httpx"
+    echo "        uv venv --system-site-packages .venv && uv pip install --python .venv/bin/python fastapi uvicorn httpx cryptography"
     echo "    Option B: use a Python 3.12/3.13 (pip install --user -r requirements.txt)"
     exit 1
 fi
@@ -51,7 +51,7 @@ if "$PYTHON_BIN" -c "import gi" >/dev/null 2>&1; then
     echo "[+] Desktop Pilot ready (PyGObject available)."
 else
     echo "[!] Desktop Pilot unavailable: PyGObject (gi) missing for this interpreter."
-    echo "    Enable it with:  uv venv --system-site-packages .venv && uv pip install --python .venv/bin/python fastapi uvicorn httpx"
+    echo "    Enable it with:  uv venv --system-site-packages .venv && uv pip install --python .venv/bin/python fastapi uvicorn httpx cryptography"
 fi
 
 # 1. Determine active provider (local llama.cpp vs OpenAI ChatGPT API)

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GROK // Unlock</title>
+    <style>
+        :root {
+            --bg: #0d1013;
+            --panel: #151a1f;
+            --line: #2a323b;
+            --text: #e8edf2;
+            --muted: #8b98a5;
+            --accent: #d8ff4f;
+            --danger: #ff6b6b;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            background: radial-gradient(circle at 50% 0%, #1b232b 0%, var(--bg) 62%);
+            color: var(--text);
+            font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+        main {
+            width: min(390px, calc(100vw - 32px));
+            padding: 34px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+        }
+        .brand { color: var(--accent); letter-spacing: 0.22em; font-size: 11px; }
+        h1 { margin: 10px 0 6px; font-size: 24px; font-weight: 600; }
+        p { color: var(--muted); margin: 0 0 22px; }
+        label { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 7px; }
+        input {
+            width: 100%;
+            padding: 12px 13px;
+            background: #0c1014;
+            color: var(--text);
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            font: inherit;
+            letter-spacing: 0.18em;
+        }
+        input:focus { outline: none; border-color: var(--accent); }
+        button {
+            width: 100%;
+            margin-top: 16px;
+            padding: 12px;
+            background: var(--accent);
+            color: #101408;
+            border: 0;
+            border-radius: 7px;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        button:disabled { opacity: 0.55; cursor: wait; }
+        .error { min-height: 18px; margin-top: 12px; color: var(--danger); font-size: 12px; }
+        .note { margin-top: 18px; color: var(--muted); font-size: 12px; }
+        a { color: var(--accent); }
+    </style>
+</head>
+<body>
+    <main>
+        <div class="brand">GROK // LOCAL</div>
+        <h1>App locked</h1>
+        <p>Enter your PIN to open the workspace on this device.</p>
+        <form id="unlock-form">
+            <label for="pin">PIN</label>
+            <input id="pin" name="pin" type="password" inputmode="numeric"
+                   autocomplete="current-password" autofocus required>
+            <button id="unlock-btn" type="submit">Unlock</button>
+        </form>
+        <div class="error" id="error" role="alert"></div>
+        <div class="note" id="note"></div>
+    </main>
+    <script>
+        (() => {
+            'use strict';
+            const form = document.getElementById('unlock-form');
+            const pin = document.getElementById('pin');
+            const button = document.getElementById('unlock-btn');
+            const error = document.getElementById('error');
+            const note = document.getElementById('note');
+            const params = new URLSearchParams(location.search);
+            let next = params.get('next') || '/';
+            if (!next.startsWith('/') || next.startsWith('//')) next = '/';
+
+            fetch('/api/v2/safety/lock-status', { credentials: 'same-origin' })
+                .then((r) => r.json())
+                .then((status) => {
+                    if (!status.lock_enabled) {
+                        form.hidden = true;
+                        note.innerHTML = 'App lock is not enabled. <a href="/">Open GROK</a>';
+                    }
+                })
+                .catch(() => {});
+
+            form.addEventListener('submit', async (event) => {
+                event.preventDefault();
+                error.textContent = '';
+                button.disabled = true;
+                try {
+                    const response = await fetch('/api/v2/safety/unlock', {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ pin: pin.value }),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+                    location.replace(next);
+                } catch (err) {
+                    error.textContent = err.message || 'Could not unlock';
+                    pin.select();
+                } finally {
+                    button.disabled = false;
+                }
+            });
+        })();
+    </script>
+</body>
+</html>

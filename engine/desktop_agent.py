@@ -32,13 +32,16 @@ from config import (
     get_active_engine_info,
 )
 
-def prepare_screenshot_for_llm(shot_path: str, max_dim: int = 1024, quality: int = 80) -> Optional[str]:
+def prepare_screenshot_for_llm(shot_path: str, max_dim: Optional[int] = None, quality: int = 85) -> Optional[str]:
     """
-    Downscales screenshot to a maximum dimension (1024px) and compresses to JPEG
-    to keep vision token count within llama-server context limits while preserving clarity.
+    Prepares screenshot for vision model. For cloud models (OpenAI / ChatGPT API),
+    preserves full native resolution up to 2048px to prevent coordinate distortion.
+    For local llama-server, downscales to 1024px if needed to save VRAM.
     """
     if not shot_path or not os.path.exists(shot_path):
         return None
+    if max_dim is None:
+        max_dim = 2048 if get_active_provider() == PROVIDER_OPENAI else 1024
     try:
         with Image.open(shot_path) as img:
             rgb_img = img.convert("RGB")
@@ -56,6 +59,40 @@ def prepare_screenshot_for_llm(shot_path: str, max_dim: int = 1024, quality: int
             return f"data:image/png;base64,{b64_str}"
         except Exception:
             return None
+
+
+def split_chained_actions(action_str: str) -> List[str]:
+    """Splits chained actions on ' then ' or ' && ' only when outside quoted string literals."""
+    tokens = []
+    current = []
+    in_quote = None
+    i = 0
+    while i < len(action_str):
+        ch = action_str[i]
+        if ch in ('"', "'"):
+            if in_quote == ch:
+                in_quote = None
+            elif in_quote is None:
+                in_quote = ch
+            current.append(ch)
+            i += 1
+        elif in_quote:
+            current.append(ch)
+            i += 1
+        elif action_str[i:i+6].lower() == " then ":
+            tokens.append("".join(current).strip())
+            current = []
+            i += 6
+        elif action_str[i:i+4] == " && ":
+            tokens.append("".join(current).strip())
+            current = []
+            i += 4
+        else:
+            current.append(ch)
+            i += 1
+    if current:
+        tokens.append("".join(current).strip())
+    return [t for t in tokens if t]
 
 
 def compute_screen_delta(
@@ -274,7 +311,7 @@ You control the desktop using mouse and keyboard actions to achieve the user's o
 
 Available Tools:
 1. open_url("url_or_query", browser="...", profile="...") - Directly opens browser to any URL or Google search query in 1 fast step (e.g. open_url("https://github.com", profile="mevinbenty") or open_url("weather in tokyo")). PREFERRED for web browsing!
-2. launch_app("app_name", profile="...") - Launch an application (e.g. launch_app("chrome", profile="mevinbenty") or launch_app("brave") or launch_app("nautilus")).
+2. launch_app("app_name", profile="...") - Launch or focus an application (e.g. launch_app("antigravity"), launch_app("code"), launch_app("chrome", profile="mevinbenty"), launch_app("terminal"), launch_app("nautilus")).
 3. navigate_browser("url_or_query") - In an already-open browser window, automatically focuses the address bar (Ctrl+L), types the URL/query, and presses Enter.
 4. type_into(x, y, "text", submit=True) - Combined click, clear, type/paste, and submit tool. Moves cursor to (x, y), clicks to focus, clears field, types text, and presses Enter if submit is True (default True). ALWAYS use this for text inputs, prompt bars, and search fields!
 5. click(x, y) - Move the mouse cursor to absolute coordinate (x, y) and left-click.
@@ -298,9 +335,14 @@ Available Tools:
 23. finish("summary") - The goal has been successfully accomplished.
 
 CRITICAL OPERATIONAL RULES:
-1. APP LAUNCHING RULE:
-   If the user's goal specifies an application (e.g. Brave, Chrome, Files, Calculator, Terminal) and that app is NOT already open and active on screen, your VERY FIRST ACTION MUST BE:
+1. APP LAUNCHING & FOCUS RULE:
+   If the user's goal specifies an application (e.g. Antigravity IDE, VS Code, Terminal, Chrome, Brave, Files, Calculator) and that app is NOT already focused on screen, your VERY FIRST ACTION MUST BE:
    Action: launch_app("<app_name>")
+   - If the user asks for Antigravity (e.g. "antigravity", "antigravity tab", "antigravity project"), use: launch_app("antigravity").
+   - If the user asks for VS Code / code editor, use: launch_app("code").
+   - If the user asks for Terminal, use: launch_app("terminal").
+   - If the user asks for web browsing, search, or a website URL, use: open_url(...) or launch_app("<browser>").
+   - CRITICAL: NEVER launch or focus Brave, Chrome, or any web browser when the user requested an IDE, code editor, or desktop application! Do NOT mistake editor tabs or project windows for browser tabs!
    NEVER click random desktop icons, taskbars, or type text before the requested application is opened!
 
 2. TEXT INPUT & CHATGPT RULES:
@@ -329,12 +371,12 @@ CRITICAL OPERATIONAL RULES:
    Only after visually/OCR verifying in Current Screen State that the goal is visibly accomplished, call finish("<summary of what was achieved>").
 
 8. NEVER CLICK OR INTERACT WITH GROK CHAT WINDOW:
-   Under NO circumstances should you click or interact with the GROK web application interface itself (identifiable by "GROK // Local Uncensored", "localhost:8000", "127.0.0.1:8000", or GROK control panels like "Stop Pilot"). If GROK is visible on screen, do NOT type in its address bar or click its buttons. Always call launch_app("<target_app>") to open and focus your destination application.
+   Under NO circumstances should you click or interact with the GROK web application interface itself (identifiable by "GROK // Local Uncensored", "localhost:8000", "127.0.0.1:8000", or GROK control panels like "Stop Pilot"). If GROK is visible on screen, do NOT type in its address bar or click its buttons. Always call launch_app("<target_app>") to open or focus your destination application (e.g. launch_app("antigravity") if the goal mentions Antigravity, or the specific target requested by the user).
 
 9. DIRECT ACTION FORMAT RULE (NO THINKING TAGS):
    Do NOT output <think>...</think> tags or conversational preamble. Immediately output:
    Thought: <1-2 sentences reasoning about what you see on screen and choosing the next step>
-   Action: <single tool call, e.g. launch_app("brave") or type_into(450, 800, "hello", submit=True) or finish("Done")>
+   Action: <single tool call, e.g. launch_app("antigravity") or type_into(450, 800, "hello", submit=True) or finish("Done")>
 
 10. LOGGED-IN PROFILES RULE:
    ALWAYS prefer the user's logged-in browser and profile via open_url(url, browser="...", profile="...") or launch_app("...", profile="..."). If the user mentions an account, profile, or username (e.g. 'mevinbenty'), specify profile="mevinbenty". If no profile is specified, use the primary active logged-in profile listed in Available Logged-In Browser Profiles.
@@ -342,22 +384,64 @@ CRITICAL OPERATIONAL RULES:
 11. HYBRID WORKSPACE & CODING RULE:
    For software projects, coding, file creation, or testing, NEVER try to type code character-by-character into text editors using click or type_text. ALWAYS use write_file("path", "content") and run_shell("command"). Use edit_file("path", "old", "new") to fix bugs.
 
+12. FALLBACK & ERROR RECOVERY RULES:
+   - VERIFY TARGET BEFORE ADVANCING: After typing or clicking, inspect the next screen state. Did the text land in the intended input field (e.g. the AI Chat prompt bar) rather than the code editor or terminal?
+   - IMMEDIATE UNDO: If text was accidentally typed into the code editor or wrong window, your IMMEDIATE NEXT ACTION MUST BE to undo or clear it (e.g. press_key("ctrl+z") or press_key("escape")) before trying anything else!
+   - NO BLIND WAITING: NEVER call wait(5), wait(10), or wait(15) unless you see active visual proof of execution on screen (e.g. streaming tokens, spinner, active terminal build). If the prompt was not submitted, DO NOT wait!
+   - ANTIGRAVITY & VS CODE NAVIGATION:
+     * In Antigravity IDE, the Chat / Agent panel is located on the RIGHT side of the screen (x > 1400 on a 1920x1200 monitor).
+     * To focus the Chat input in Antigravity or VS Code, use press_key("ctrl+l") or click the chat input prompt area on the lower right (around x=1600, y=1080).
+     * NEVER click in the center-left area (x < 1300) when aiming for the Chat panel, as that is the code editor.
+
+13. EXACT COORDINATE RESOLUTION:
+   - Current Desktop Resolution is 1920x1200.
+   - All coordinates for click(x, y), double_click(x, y), and type_into(x, y) MUST be specified in this native 1920x1200 coordinate space.
+   - Always refer to the coordinates provided in the Current Screen State list or use click_text("exact phrase") to hit elements precisely.
+
 Respond STRICTLY in this format:
 Thought: <1-2 sentences reasoning about what you see on screen and choosing the next step>
-Action: <single tool call, e.g. launch_app("brave") or type_into(450, 800, "cats", submit=True) or finish("Done")>"""
+Action: <single tool call, e.g. launch_app("antigravity") or type_into(450, 800, "cats", submit=True) or finish("Done")>"""
+
+
+WORKSPACE_SYSTEM_PROMPT = """You are Grok Task Agent, an autonomous coding, research and file agent working INSIDE a sandboxed workspace.
+You do NOT control a GUI. You operate only through workspace and web tools, and you must verify your work.
+
+Available Tools:
+1. write_file("rel_path", "content") - Create/overwrite a file in the workspace.
+2. edit_file("rel_path", "old_str", "new_str") - Patch an existing workspace file.
+3. read_file("rel_path") - Read a workspace file.
+4. run_shell("command") - Run builds, installs, pytest, or shell commands inside the workspace.
+5. web_search("query") - Search the internet and get ranked results (title/url/snippet).
+6. web_fetch("url") - Fetch a web page and extract readable text.
+7. web_research("query", fetch_top=2) - Search then fetch the top pages for deeper context.
+8. save_web_result("rel_path") - Save the most recent web context into a workspace file.
+9. finish("summary") - The goal has been accomplished.
+
+CRITICAL RULES:
+1. For code, always use write_file/edit_file. Never describe code without writing it.
+2. Use run_shell to actually run tests/builds and read the output. Report real results, not assumptions.
+3. Use web_search/web_fetch to gather facts you do not know. Cite the URLs you used.
+4. Verify before finishing: after writing files or running commands, read/confirm the output in a subsequent step.
+5. Keep going until the objective is truly complete, then call finish("<summary + verification evidence>").
+
+Respond STRICTLY in this format:
+Thought: <1-2 sentences reasoning about the next step>
+Action: <single tool call, e.g. write_file("main.py", "...") or run_shell("pytest -q") or finish("Done")>"""
 
 
 class DesktopAgent:
-    def __init__(self, llm_client=None, llama_client=None, controller=None, workspace_manager=None):
+    def __init__(self, llm_client=None, llama_client=None, controller=None, workspace_manager=None, use_gui: bool = True):
         self._custom_controller = controller is not None
         self.controller = controller or WaylandController.get_instance()
         self.workspace_manager = workspace_manager
+        self.use_gui = use_gui
         # Client may be a LlamaClient, an OpenAIClient, or a ProviderRouter
         self.llm_client = llm_client or llama_client or LlamaClient()
         self.is_running = False
         self._abort_requested = False
         self.current_task = ""
         self.step_history: List[Dict[str, Any]] = []
+        self._last_web_context: str = ""
 
     def abort(self) -> None:
         """Emergency stop for active agent execution."""
@@ -420,6 +504,114 @@ class DesktopAgent:
             lines.append(f'[{idx}] "{item["text"]}" at coordinates ({item["cx"]}, {item["cy"]})')
 
         return "\n".join(lines)
+
+    async def execute_workspace_task(self, goal: str, max_steps: int = 25) -> AsyncGenerator[Dict[str, Any], None]:
+        """Headless ReAct loop using only workspace + web tools (no GUI control)."""
+        self.is_running = True
+        self._abort_requested = False
+        self.current_task = goal
+        self.step_history = []
+
+        yield {
+            "step": 0,
+            "action": "initialize",
+            "detail": f"Starting workspace-only agent for: '{goal}'",
+            "screenshot_url": None,
+            "status": "running"
+        }
+
+        engine_ok = await asyncio.to_thread(self._ensure_engine)
+        if not engine_ok:
+            self.is_running = False
+            if get_active_provider() == PROVIDER_OPENAI:
+                reason = "No OpenAI API key configured. Add your ChatGPT key in the sidebar."
+            else:
+                reason = "Failed to start or connect to the local llama-server."
+            yield {"step": 0, "action": "error", "detail": reason, "screenshot_url": None, "status": "error"}
+            return
+
+        history_log: List[str] = []
+        finished = False
+        step = 1
+        try:
+            while step <= max_steps and not self._abort_requested and self.is_running:
+                history_text = "\n".join(history_log[-6:]) if history_log else "None."
+
+                workspace_listing = ""
+                if self.workspace_manager:
+                    try:
+                        files = self.workspace_manager.list_files("")
+                        workspace_listing = "\n".join(f"- {f['path']}" for f in files[:60]) or "(empty workspace)"
+                    except Exception:
+                        workspace_listing = "(unavailable)"
+
+                user_prompt = f"""Goal: {goal}
+
+Workspace files:
+{workspace_listing}
+
+Recent Steps Taken:
+{history_text}
+
+What is your next action?"""
+
+                agent_messages = [
+                    {"role": "system", "content": WORKSPACE_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt}
+                ]
+                chatml_prompt = format_chatml_prompt(agent_messages)
+
+                thought = ""
+                action_str = ""
+                full_response = []
+                try:
+                    async for chunk in self.llm_client.stream_completion(
+                        prompt=chatml_prompt,
+                        messages=agent_messages,
+                        image_data=None,
+                        temperature=0.15,
+                        top_p=0.9,
+                        max_tokens=600,
+                        reasoning_effort="low"
+                    ):
+                        if "error" in chunk:
+                            yield {"step": step, "action": "error", "detail": chunk["error"], "status": "error"}
+                            self.is_running = False
+                            return
+                        tok = chunk.get("token", "")
+                        full_response.append(tok)
+                except Exception as e:
+                    yield {"step": step, "action": "error", "detail": f"Inference failed: {e}", "status": "error"}
+                    self.is_running = False
+                    return
+
+                thought, action_str = parse_pilot_response("".join(full_response))
+                if not action_str:
+                    history_log.append(f"Step {step}: no valid action parsed")
+                    yield {"step": step, "action": "none", "thought": thought, "detail": "No valid action parsed; retrying.", "status": "running"}
+                    step += 1
+                    continue
+
+                detail, is_finished = await self._execute_action(action_str, [])
+                history_log.append(f"Step {step}: {action_str} -> {detail[:200]}")
+                self.step_history.append({"step": step, "action": action_str, "detail": detail})
+                yield {
+                    "step": step,
+                    "action": action_str,
+                    "thought": thought,
+                    "detail": detail,
+                    "screenshot_url": None,
+                    "status": "completed" if is_finished else "running"
+                }
+                if is_finished:
+                    finished = True
+                    break
+                step += 1
+        finally:
+            self.is_running = False
+
+        if not finished and not self._abort_requested:
+            yield {"step": step, "action": "max_steps", "detail": f"Reached max steps ({max_steps}) without finishing.", "status": "max_steps"}
 
     async def execute_task(self, goal: str, max_steps: int = 15) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -526,6 +718,7 @@ class DesktopAgent:
             except Exception:
                 has_vision = False
 
+        finished = False
         try:
             while step <= max_steps and not self._abort_requested and self.is_running:
                 # 1. Capture current live screen state
@@ -558,10 +751,10 @@ class DesktopAgent:
                                 "You must use a different coordinate, hit a broader target, scroll, or try an alternative approach.\n\n"
                             )
 
-                # Prepare screenshot data URI for vision models (downscaled to max 1024px JPEG)
+                # Prepare screenshot data URI for vision models (preserve up to 2048px for OpenAI, 1024px for local)
                 image_data = None
                 if has_vision and os.path.exists(current_shot):
-                    image_data = prepare_screenshot_for_llm(current_shot, max_dim=1024, quality=80)
+                    image_data = prepare_screenshot_for_llm(current_shot, max_dim=None, quality=85)
 
                 # 2. Build prompt for the active engine (local model or ChatGPT)
                 history_text = "\n".join(history_log[-4:]) if history_log else "None."
@@ -596,6 +789,9 @@ class DesktopAgent:
                 loop_breaker_interrupt = ""  # Reset after consuming for prompt
 
                 user_prompt = f"""Goal: {goal}
+
+Desktop Display Coordinate Space: {bounds[2]}x{bounds[3]} (Native Resolution).
+All mouse click/type coordinates MUST be specified in this exact {bounds[2]}x{bounds[3]} coordinate space.
 
 {interrupt_prefix}{stalled_warning}{vision_hint}Current Screen State:
 {elements_text}
@@ -645,6 +841,9 @@ What is your next action?"""
                         step, inference_error
                     )
                     retry_user_prompt = f"""Goal: {goal}
+
+Desktop Display Coordinate Space: {bounds[2]}x{bounds[3]} (Native Resolution).
+All mouse click/type coordinates MUST be specified in this exact {bounds[2]}x{bounds[3]} coordinate space.
 
 {interrupt_prefix}{stalled_warning}Current Screen State:
 {elements_text}
@@ -766,6 +965,8 @@ What is your next action?"""
                     "status": status
                 }
 
+                if is_finished:
+                    finished = True
                 if is_finished or self._abort_requested:
                     break
 
@@ -780,6 +981,14 @@ What is your next action?"""
                     "screenshot_url": None,
                     "status": "aborted"
                 }
+            elif not finished and step > max_steps:
+                yield {
+                    "step": step,
+                    "action": "max_steps",
+                    "detail": f"Reached maximum steps ({max_steps}) without explicit finish().",
+                    "screenshot_url": None,
+                    "status": "max_steps"
+                }
         finally:
             self.controller.stop_shake_detector()
             self.is_running = False
@@ -788,9 +997,9 @@ What is your next action?"""
         """Parses and executes tool call(s) using WaylandController."""
         action_clean = action_str.strip()
 
-        # Handle chained actions separated by 'then' or '&&'
-        if " then " in action_clean or " && " in action_clean:
-            sub_actions = [a.strip() for a in re.split(r"\s+then\s+|\s*&&\s*", action_clean) if a.strip()]
+        # Handle chained actions separated by 'then' or '&&' outside quotes
+        sub_actions = split_chained_actions(action_clean)
+        if len(sub_actions) > 1:
             details = []
             is_done = False
             for sub_a in sub_actions:
@@ -811,6 +1020,70 @@ What is your next action?"""
         if m:
             summary = m.group(1).strip() or "Goal achieved."
             return f"Task completed: {summary}", True
+
+        # web_search("query") - headless internet search (no browser/GUI needed)
+        m = re.match(r"web_search\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE | re.DOTALL)
+        if m:
+            from engine.web_tools import web_search
+            query = m.group(1).strip()
+            res = await web_search(query)
+            if res.get("success"):
+                lines = [f"- {r['title']} ({r['url']})" + (f": {r['snippet'][:120]}" if r.get("snippet") else "") for r in res["results"]]
+                self._last_web_context = "\n".join(lines)
+                return f"Web search '{query}' returned {len(res['results'])} results:\n" + "\n".join(lines), False
+            return f"Web search '{query}' failed: {res.get('error')}", False
+
+        # web_fetch("url") - fetch and extract page text
+        m = re.match(r"web_fetch\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE | re.DOTALL)
+        if m:
+            from engine.web_tools import web_fetch
+            url = m.group(1).strip()
+            res = await web_fetch(url)
+            if res.get("success"):
+                snippet = res.get("content", "")[:2500]
+                self._last_web_context = snippet
+                return f"Fetched '{res.get('url')}' ({res.get('length')} chars). Extracted content:\n{snippet}", False
+            return f"Web fetch '{url}' failed: {res.get('error')}", False
+
+        # web_research("query", fetch_top=N) - search + fetch top pages
+        m = re.match(r"web_research\((.*)\)", action_clean, re.IGNORECASE | re.DOTALL)
+        if m:
+            from engine.web_tools import web_research
+            args_str = m.group(1).strip()
+            query = ""
+            fetch_top = 2
+            qm = re.match(r"[\"'](.*?)[\"']", args_str)
+            if qm:
+                query = qm.group(1).strip()
+                rem = args_str[qm.end():].strip()
+                fm = re.search(r"fetch_top\s*=\s*(\d+)", rem)
+                if fm:
+                    fetch_top = int(fm.group(1))
+            if query:
+                res = await web_research(query, fetch_top=fetch_top)
+                if res.get("success"):
+                    parts = [f"Research '{query}' ({len(res.get('results', []))} results):"]
+                    for r in res.get("results", []):
+                        parts.append(f"- {r['title']} ({r['url']})")
+                    for p in res.get("pages", []):
+                        parts.append(f"\n### {p.get('title')} ({p.get('url')})\n{p.get('content', '')[:1500]}")
+                    text = "\n".join(parts)
+                    self._last_web_context = text
+                    return text, False
+                return f"Web research '{query}' failed: {res.get('error')}", False
+            return "web_research requires a query string.", False
+
+        # save_web_result("rel_path") - persist last web context into workspace
+        m = re.match(r"save_web_result\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE | re.DOTALL)
+        if m:
+            rel_path = m.group(1).strip()
+            if self.workspace_manager and getattr(self, "_last_web_context", ""):
+                try:
+                    self.workspace_manager.write_file(rel_path, self._last_web_context)
+                    return f"Saved web research to '{rel_path}'.", False
+                except Exception as e:
+                    return f"Failed to save web result: {e}", False
+            return "No web context available to save.", False
 
         # open_url(url_or_query, browser=..., profile=...)
         m = re.match(r"open_url\((.*)\)", action_clean, re.IGNORECASE | re.DOTALL)
@@ -943,29 +1216,32 @@ What is your next action?"""
         m = re.match(r"click_text\([\"'](.*?)[\"']\)", action_clean, re.IGNORECASE)
         if m:
             target_text = m.group(1).strip().lower()
-            target_words = set(re.findall(r"\w+", target_text))
+            target_words = set(target_text.split())
+            elements = getattr(self, "_current_step_elements", None) or raw_elements
             best_el = None
             best_score = 0.0
 
-            for el in raw_elements:
-                t = el["text"].strip().lower()
+            for el in elements:
+                t = el.get("text", "").strip().lower()
                 if not t:
                     continue
                 # 1. Exact match gets highest score
                 if target_text == t:
-                    score = 100.0 + len(t)
-                # 2. Target text is entirely contained within the element
+                    score = 1000.0
+                # 2. Target text is entirely contained within the element phrase
                 elif target_text in t:
-                    score = 50.0 + (len(target_text) / len(t)) * 10
-                # 3. Element text is entirely contained in target (only if substantial length >= 3)
-                elif len(t) >= 3 and t in target_text:
-                    score = 20.0 + (len(t) / len(target_text)) * 10
+                    score = 500.0 + (len(target_text) / len(t)) * 100.0
+                # 3. Element text is contained in target text (only if substantial word match)
+                elif t in target_text and len(t) >= 4:
+                    if any(w == t for w in target_words):
+                        score = 300.0 + (len(t) / len(target_text)) * 100.0
+                    else:
+                        score = 50.0 + (len(t) / len(target_text)) * 50.0
                 else:
-                    # 4. Word-level overlap
-                    el_words = set(re.findall(r"\w+", t))
+                    el_words = set(t.split())
                     overlap = target_words.intersection(el_words)
                     if overlap:
-                        score = len(overlap) * 5.0
+                        score = (len(overlap) / max(len(target_words), len(el_words))) * 200.0
                     else:
                         score = 0.0
 
@@ -973,12 +1249,15 @@ What is your next action?"""
                     best_score = score
                     best_el = el
 
-            if best_el and best_score >= 10.0:
-                cx, cy = best_el["cx"], best_el["cy"]
+            if best_el and best_score >= 60.0:
+                cx = best_el.get("cx", best_el.get("x", 0) + best_el.get("w", 0) // 2)
+                cy = best_el.get("cy", best_el.get("y", 0) + best_el.get("h", 0) // 2)
                 self.controller.click(cx, cy)
                 await asyncio.sleep(0.5)
-                return f"Found '{best_el['text']}' at ({cx}, {cy}). Moved cursor and clicked.", False
-            return f"Element '{target_text}' not found on screen.", False
+                return f"Found '{best_el.get('text', '')}' at ({cx}, {cy}). Moved cursor and clicked.", False
+
+            cand_msg = f" (closest was '{best_el.get('text', '')}' with low score {best_score:.0f})" if best_el else ""
+            return f"Element '{target_text}' not reliably found on screen{cand_msg}. Refused to click random coordinates.", False
 
         # type_into(...)
         if action_clean.lower().startswith("type_into("):

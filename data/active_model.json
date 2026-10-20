@@ -1,5 +1,5 @@
 {
   "active_model_id": "qwen",
-  "provider": "local",
+  "provider": "openai",
   "openai_model": "gpt-5.6-luna"
 }

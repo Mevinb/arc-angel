@@ -389,6 +389,24 @@ LLAMA_URL = f"http://{LLAMA_HOST}:{LLAMA_PORT}"
 WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
 
+# Attachments (chat document/code uploads)
+ATTACHMENTS_DIR = DATA_DIR / "attachments"
+ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+MAX_ATTACHMENT_BYTES = int(os.getenv("GROK_MAX_ATTACHMENT_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+MAX_ATTACHMENT_CHARS = int(os.getenv("GROK_MAX_ATTACHMENT_CHARS", "40000"))  # chars injected into prompt
+
+# Task orchestration
+TASK_MAX_ATTEMPTS = int(os.getenv("GROK_TASK_MAX_ATTEMPTS", "3"))
+TASK_MAX_STEPS_PER_SUBGOAL = int(os.getenv("GROK_TASK_MAX_STEPS", "25"))
+TASK_EVENT_HEARTBEAT_SECONDS = float(os.getenv("GROK_TASK_HEARTBEAT_SECONDS", "15"))
+TASKS_IN_WORKSPACE_ONLY = os.getenv("GROK_TASK_MODE", "").lower() == "workspace"
+
+# Web tools (agent internet access; no API key required)
+WEB_SEARCH_ENABLED = os.getenv("GROK_WEB_SEARCH", "1") != "0"
+WEB_SEARCH_MAX_RESULTS = int(os.getenv("GROK_WEB_SEARCH_RESULTS", "5"))
+WEB_FETCH_TIMEOUT = float(os.getenv("GROK_WEB_FETCH_TIMEOUT", "20"))
+WEB_FETCH_MAX_CHARS = int(os.getenv("GROK_WEB_FETCH_MAX_CHARS", "8000"))
+
 # Context & Memory Limits (Designed for local models + vision tokens)
 DEFAULT_CTX_SIZE = int(os.getenv("CTX_SIZE", "8192"))  # Expanded context to 8k for vision + tools
 MAX_PROMPT_TOKENS = int(os.getenv("MAX_PROMPT_TOKENS", "3000"))

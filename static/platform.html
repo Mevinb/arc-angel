@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GROK // Command Center</title>
+    <link rel="stylesheet" href="/static/css/platform.css">
+</head>
+<body>
+    <div class="pf-shell">
+        <aside class="pf-rail">
+            <div class="pf-brand">
+                <div class="pf-logo">/</div>
+                <div>
+                    <div class="pf-brand-title">GROK</div>
+                    <div class="pf-brand-sub">COMMAND CENTER</div>
+                </div>
+            </div>
+
+            <nav class="pf-nav" aria-label="Platform sections">
+                <button class="pf-nav-item active" data-view="overview"><span>◈</span>Overview</button>
+                <button class="pf-nav-item" data-view="tasks"><span>▣</span>Tasks &amp; Runs</button>
+                <button class="pf-nav-item" data-view="approvals"><span>⚑</span>Approvals <b id="pf-approval-count" class="pf-badge">0</b></button>
+                <button class="pf-nav-item" data-view="knowledge"><span>◇</span>Knowledge</button>
+                <button class="pf-nav-item" data-view="research"><span>⌕</span>Research</button>
+                <button class="pf-nav-item" data-view="connectors"><span>⇄</span>Connectors</button>
+                <button class="pf-nav-item" data-view="automations"><span>◷</span>Automations</button>
+                <button class="pf-nav-item" data-view="files"><span>▤</span>Files &amp; Code</button>
+                <button class="pf-nav-item" data-view="audit"><span>⎔</span>Audit</button>
+                <button class="pf-nav-item" data-view="settings"><span>⚙</span>Settings</button>
+            </nav>
+
+            <div class="pf-rail-footer">
+                <div class="pf-safety" id="pf-safety-pill">
+                    <span class="pf-dot"></span><span id="pf-safety-text">Checking safety…</span>
+                </div>
+                <a class="pf-back" href="/">← Back to chat</a>
+            </div>
+        </aside>
+
+        <main class="pf-main">
+            <header class="pf-topbar">
+                <div>
+                    <div class="pf-kicker">LOCAL-FIRST OPERATIONS</div>
+                    <h1 id="pf-title">Overview</h1>
+                </div>
+                <div class="pf-top-actions">
+                    <span class="pf-clock" id="pf-clock"></span>
+                    <button class="pf-btn pf-btn-ghost" id="pf-refresh">Refresh</button>
+                    <button class="pf-btn pf-btn-danger" id="pf-stop-all">Stop all runs</button>
+                </div>
+            </header>
+
+            <div id="pf-error" class="pf-alert pf-alert-error hidden"></div>
+            <section id="pf-view" class="pf-view" aria-live="polite"></section>
+        </main>
+    </div>
+
+    <div id="pf-modal" class="pf-modal hidden" role="dialog" aria-modal="true">
+        <div class="pf-modal-card">
+            <div class="pf-modal-head">
+                <h2 id="pf-modal-title">Action</h2>
+                <button class="pf-icon-btn" id="pf-modal-close" aria-label="Close">×</button>
+            </div>
+            <div id="pf-modal-body"></div>
+        </div>
+    </div>
+
+    <div id="pf-toast" class="pf-toast hidden"></div>
+    <script src="/static/js/platform.js"></script>
+</body>
+</html>

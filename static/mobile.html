@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>GROK // Pocket</title>
+    <link rel="stylesheet" href="/static/css/mobile.css">
+</head>
+<body>
+    <div class="m-shell">
+        <header class="m-header">
+            <a class="m-brand" href="/mobile" aria-label="GROK Pocket home">
+                <span class="m-logo">/</span>
+                <span><strong>GROK</strong><small>POCKET</small></span>
+            </a>
+            <div class="m-header-actions">
+                <span id="m-status" class="m-status">Local</span>
+                <button id="m-refresh" class="m-icon" type="button" aria-label="Refresh brief" hidden>&#8635;</button>
+            </div>
+        </header>
+
+        <main class="m-main">
+            <section id="pair-view" class="m-panel">
+                <div class="m-kicker">SECURE PAIRING</div>
+                <h1>Carry the command center.</h1>
+                <p class="m-muted">Pair this phone with the device ID and one-time code shown in <strong>Command Center &rarr; Settings</strong>.</p>
+                <form id="pair-form" class="m-form">
+                    <label for="pair-device">Device ID</label>
+                    <input id="pair-device" class="m-input" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="md_..." required>
+                    <label for="pair-code">Pairing code</label>
+                    <input id="pair-code" class="m-input m-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="000000" required>
+                    <button class="m-primary" type="submit">Pair this phone</button>
+                </form>
+                <div id="pair-error" class="m-alert m-alert-error" hidden></div>
+                <a class="m-link" href="/">&larr; Back to desktop chat</a>
+            </section>
+
+            <section id="app-view" hidden>
+                <div class="m-greeting">
+                    <div>
+                        <div class="m-kicker" id="m-date">TODAY</div>
+                        <h1>Daily brief</h1>
+                    </div>
+                    <span id="m-safety" class="m-chip">Safety active</span>
+                </div>
+
+                <section class="m-card" id="m-brief-card">
+                    <div class="m-card-head"><h2>What needs you</h2><span id="m-brief-time" class="m-dim"></span></div>
+                    <div id="m-brief" class="m-list"><div class="m-empty">Loading your brief...</div></div>
+                </section>
+
+                <section class="m-card">
+                    <div class="m-card-head"><h2>Quick command</h2></div>
+                    <p class="m-muted m-small">Start a task, save a note, or ask Atlas to handle it.</p>
+                    <form id="command-form" class="m-form">
+                        <textarea id="command-text" class="m-input m-textarea" rows="3" placeholder="task: prepare my weekly review&#10;note: idea for the launch" required></textarea>
+                        <button class="m-primary" type="submit">Send to Atlas</button>
+                    </form>
+                    <div id="command-result" class="m-result" hidden></div>
+                </section>
+
+                <section class="m-card">
+                    <div class="m-card-head"><h2>Share something</h2></div>
+                    <form id="share-form" class="m-form">
+                        <input id="share-title" class="m-input" placeholder="Title (optional)">
+                        <textarea id="share-text" class="m-input m-textarea" rows="3" placeholder="Link, snippet, or thought..." required></textarea>
+                        <button class="m-secondary" type="submit">Queue a task from this</button>
+                    </form>
+                    <div id="share-result" class="m-result" hidden></div>
+                </section>
+
+                <section class="m-card m-device-card">
+                    <div>
+                        <div class="m-kicker">THIS DEVICE</div>
+                        <strong id="m-device-name">Paired phone</strong>
+                        <div id="m-device-meta" class="m-dim m-small"></div>
+                    </div>
+                    <button id="m-signout" class="m-danger" type="button">Unpair</button>
+                </section>
+            </section>
+        </main>
+
+        <div id="m-toast" class="m-toast" hidden></div>
+        <footer class="m-footer"><a href="/platform">Command Center</a><span>Local-first &middot; auditable</span></footer>
+    </div>
+    <script src="/static/js/mobile.js"></script>
+</body>
+</html>

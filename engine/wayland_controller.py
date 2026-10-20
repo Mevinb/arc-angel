@@ -644,6 +644,8 @@ class WaylandController:
             return "gnome-calculator"
         elif app in ["code", "vscode"]:
             return "code"
+        elif app in ["antigravity", "antigravity-ide", "antigravity ide", "agy"]:
+            return "antigravity"
         elif app in ["settings"]:
             return "gnome-control-center"
         return command_or_app
@@ -681,12 +683,16 @@ class WaylandController:
                 if not app:
                     continue
                 app_name = (app.get_name() or "").lower()
-                matches = not target_kw or (target_kw in app_name) or any(k in app_name for k in ["brave", "chrome", "chromium", "firefox", "calculator", "nautilus", "files"])
-                if matches:
-                    for j in range(app.get_child_count()):
-                        win = app.get_child_at_index(j)
-                        if not win:
-                            continue
+                app_matches = (target_kw in app_name) if target_kw else any(
+                    k in app_name for k in ["antigravity", "code", "brave", "chrome", "chromium", "firefox", "calculator", "nautilus", "files", "terminal"]
+                )
+                for j in range(app.get_child_count()):
+                    win = app.get_child_at_index(j)
+                    if not win:
+                        continue
+                    win_name = (win.get_name() or "").lower()
+                    win_matches = (target_kw in win_name) if target_kw else False
+                    if app_matches or win_matches:
                         states = win.get_state_set()
                         if states.contains(Atspi.StateType.SHOWING) or states.contains(Atspi.StateType.VISIBLE):
                             comp = win.get_component_iface()
@@ -700,7 +706,7 @@ class WaylandController:
                                 if bbox.width > 100 and bbox.height > 100:
                                     # Click top bar / header to bring window to front
                                     hx = max(10, bbox.x + min(200, bbox.width // 2))
-                                    hy = max(10, bbox.y + 15)
+                                    hy = max(10, bbox.y + (40 if bbox.y == 0 else 15))
                                     self.click(hx, hy)
                                     time.sleep(0.15)
                                     return True
@@ -719,6 +725,14 @@ class WaylandController:
     @classmethod
     def launch_app(cls, command_or_app: str, wait_seconds: float = 2.5, profile: Optional[str] = None) -> None:
         """Launches an application in the background and waits for the window to render on Wayland."""
+        # If application is already open and running, focus it directly
+        try:
+            if cls.get_instance().focus_window(command_or_app):
+                time.sleep(0.5)
+                return
+        except Exception:
+            pass
+
         cmd = cls.resolve_app_command(command_or_app, profile=profile)
         subprocess.Popen(
             cmd,

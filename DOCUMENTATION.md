@@ -39,6 +39,10 @@ FastAPI server (server.py)
    │                  └─► OpenAIClient  ──► api.openai.com/v1 (or custom base URL)
    ├── MemoryOrchestrator ──► SQLite data/grok_memory.db
    │      (dossier · episodic FTS5 · summaries · messages/sessions)
+   ├── /api/v2 platform ──► services/*
+   │      (agents · run manager · approvals · knowledge · connectors · audit)
+   │      ├── Command Center UI  /platform
+   │      └── Pocket companion   /mobile
    ├── VisionEngine (BLIP caption + Tesseract OCR — fallback for non-vision models)
    └── DesktopAgent ──► WaylandController ──► GNOME Mutter DBus
                               │                 ├── org.gnome.Mutter.RemoteDesktop (input)
@@ -77,6 +81,14 @@ FastAPI server (server.py)
 - Autonomous multi-step desktop control on **GNOME Wayland** through Mutter's RemoteDesktop/ScreenCast APIs — no xdotool hacks, no permission dialogs.
 - Works with **either engine**: the pilot's "brain" can be a local model or a ChatGPT model.
 - Live viewer in the UI: screenshot of the pilot's view, current thought, action, step counter, and a red **Stop Pilot** emergency button.
+
+**Autonomous platform (v2)**
+- **Command Center** at `/platform`: task/run board, approval inbox, knowledge, research, connectors, automations, files/code, audit, backup and safety controls.
+- **Pocket companion** at `/mobile`: one-time-code pairing, daily brief, quick task/note commands, and share-to-Atlas.
+- **Agents and resumable runs** with checkpoints, budgets, pause/resume/cancel/retry, restart recovery, and a live event stream.
+- **Policy-gated tools**: risky actions pause the run for approval; the kill switch cancels supervised runs and stops automation scheduling.
+- **Knowledge vault** with local hybrid retrieval and citations; **research projects** with notes, claims and reports.
+- **Encrypted connector credentials**, scheduled tasks, HMAC webhooks, file checkpoints, code indexing, SQLite backups with optional passphrase encryption, privacy export and a hash-chain audit log.
 
 **Operations & safety**
 - One-command start (`./start.sh`) with automatic Python/venv detection, engine bootstrap, and provider-aware startup.
@@ -319,7 +331,7 @@ clicking anything, and never click random taskbar/desktop icons.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Desktop Pilot requires PyGObject (python3-gi)…` | interpreter without `gi` | run with the project venv (`uv venv --system-site-packages .venv && uv pip install --python .venv/bin/python fastapi uvicorn httpx`), then `./start.sh` |
+| `Desktop Pilot requires PyGObject (python3-gi)…` | interpreter without `gi` | run with the project venv (`uv venv --system-site-packages .venv && uv pip install --python .venv/bin/python fastapi uvicorn httpx cryptography pydantic pillow`), then `./start.sh` |
 | `Failed to initialize desktop capture: …` | no session bus / not a GNOME Wayland session | launch the app from a terminal **inside** your desktop session |
 | Screenshot times out / `gst-launch` error | missing GStreamer tools or PipeWire | `sudo apt install gstreamer1.0-tools` |
 | No text elements → pilot clicks blindly | `tesseract` missing | `sudo apt install tesseract-ocr` |
@@ -385,7 +397,95 @@ is managed by `engine/process_manager.py` (pid file in `data/`, logs to
 
 ---
 
-## 8. HTTP API Reference
+## 8. Autonomous Platform (v2)
+
+The v2 platform is additive. Existing chats, memory and Desktop Pilot endpoints stay
+unchanged; v2 tables are created idempotently by `services/db.py::init_platform_db()` on
+startup, and no destructive migration runs automatically.
+
+### 8.1 Services
+
+| Module | Responsibility |
+|---|---|
+| `services/agents.py` | Built-in/custom agent manifests, tool allowlists, model profiles, templates. |
+| `services/tasks.py` | Tasks, runs, steps, events, dependency checks, budgets, transitions, recovery. |
+| `services/run_manager.py` | Background supervision, pause/resume/cancel, event fan-out, restart recovery, kill switch integration. |
+| `services/agent_runtime.py` | JSON-action execution loop, checkpointing, budget enforcement, approval waits, finalization. |
+| `services/tools.py` / `builtin_tools.py` | Typed tool registry and built-in files, shell, web, knowledge, connector and desktop tools. |
+| `services/policies.py` | Risk classes, approval records, policy evaluation, approval resume/failure handling. |
+| `services/knowledge.py` | Sources, chunks, local 384-dimension hashed embeddings, FTS5 + semantic retrieval, cited answers. |
+| `services/research.py` | Research projects, notes, claims, bibliography and report assembly. |
+| `services/connectors.py` | Catalog, encrypted credentials, OAuth helpers, sync, cached items and actions. |
+| `services/automations.py` | Schedule/webhook triggers, HMAC verification, scheduler loop and run history. |
+| `services/files.py` | Approved-root file tree/read/write helpers, checkpoints, diffs and restore. |
+| `services/code_index.py` | Symbol indexing, code search and git repository status. |
+| `services/backup.py` | SQLite/workspace backups (optional passphrase encryption), restore and privacy cleanup. |
+| `services/audit.py` | Append-only, hash-chained audit events and verification/export. |
+| `services/mobile.py` | One-time pairing codes, hashed mobile tokens, briefs, commands and shares. |
+| `services/safety.py` | Kill switch, offline/redaction modes, and an enforced PIN app lock with expiring unlock cookies. |
+
+### 8.2 Runs, statuses and approvals
+
+- Task/run statuses: `queued`, `waiting`, `running`, `paused`, `awaiting_approval`,
+  `completed`, `partially_completed`, `failed`, `cancelled`, `interrupted`.
+- `completed`, `partially_completed`, `failed` and `cancelled` are terminal. A run that
+  exhausts a step/tool/time/cost budget after doing useful work ends as
+  `partially_completed`.
+- The runtime checkpoints messages, plan, artifacts, usage and step count after every
+  action. Startup recovery marks unfinished runs `interrupted` and resumes those allowed
+  by their budget.
+- Tool execution can return `awaiting_approval`. The run pauses, a pending approval is
+  recorded, and the agent continues only after `/approvals/{id}/resolve` approves it.
+  Denial fails the run without retrying an equivalent bypass.
+- Run events are persisted once per transition and streamed over
+  `GET /api/v2/runs/{id}/events/stream` (SSE).
+
+### 8.3 Command Center (`/platform`)
+
+The Command Center is a no-build vanilla-JS operations UI backed entirely by `/api/v2`:
+
+- Overview: active work, pending approvals, spend, recent runs, activity and safety.
+- Tasks & Runs: create/start/pause/resume/retry/cancel tasks and inspect steps/events.
+- Approvals: approve or deny pending actions; approved connector actions run explicitly.
+- Knowledge: add notes, ask cited questions, inspect sources and reindex.
+- Research: create projects, launch agent tasks, inspect notes/claims/report.
+- Connectors: connect credentials or OAuth, test, sync and disconnect.
+- Automations: schedule tasks, create HMAC webhooks, run/toggle/delete.
+- Files & Code: approved-root browsing, previews, checkpoint operations, code indexing.
+- Audit: verify the hash chain and export JSON.
+- Settings: kill switch, offline mode, backups, mobile pairing and privacy export.
+
+### 8.4 Pocket companion (`/mobile`)
+
+1. In **Command Center → Settings**, create a pairing for a phone.
+2. Open the displayed `/mobile?device=...&code=...` link (or enter the device ID and
+   six-digit code manually) within 10 minutes.
+3. The phone receives a bearer token stored in `localStorage`; only its hash is stored in
+   SQLite. Requests use `X-Mobile-Token` or `Authorization: Bearer`.
+4. The companion can read `/mobile/me`, `/mobile/brief`, run `/mobile/command` and
+   `/mobile/share`, and revoke its device. Tokens can be revoked from Settings at any time.
+
+### 8.5 Safety, files and audit
+
+- The kill switch cancels supervised runs, updates their tasks, and schedules the
+  automation scheduler to stop. Offline mode disables network/provider/connector paths.
+- File tools are constrained to approved roots (`data/workspaces`, the repository, and
+  `GROK_WORKSPACE_ROOTS`). Checkpoint restore can merge (default) or `prune=true` files
+  added after the snapshot; every restore first creates a safety checkpoint.
+- Connector credentials and sensitive values are encrypted with the local master key and
+  redacted from audit/log output. The audit table is append-only with update/delete
+  triggers and a SHA-256 hash chain.
+- Backups deliberately exclude `data/secrets/master.key`: an unencrypted archive must
+  never contain both ciphertext and the key that decrypts it. To restore encrypted
+  credentials on a different machine, provide the original `GROK_MASTER_KEY` (or copy
+  `master.key` separately). "Delete all data" clears legacy chats, memory, desktop tasks
+  and v2 tables; `delete_files=true` also removes workspaces, uploads, attachments,
+  checkpoints, plugins, the OpenAI key and runtime state. The safety backup and audit
+  trail are retained unless explicitly removed.
+
+---
+
+## 9. HTTP API Reference
 
 All endpoints are on `http://127.0.0.1:8000`.
 
@@ -410,6 +510,33 @@ All endpoints are on `http://127.0.0.1:8000`.
 | `POST /api/desktop/stop` | Emergency stop. |
 | `GET /api/desktop/status` | Pilot running state + screen bounds. |
 | `GET /api/desktop/shot?path=` | Serve a pilot screenshot PNG (must be under `/tmp/grok_shots`). |
+| `GET /platform` | Command Center UI (`static/platform.html`). |
+| `GET /mobile` | Pocket companion UI (`static/mobile.html`); uses its own pairing token and stays reachable while the app lock is engaged. |
+| `GET /unlock` | PIN unlock screen used when the optional app lock is enabled. |
+| `GET /api/v2/health` · `GET /api/v2/meta` | Platform health, version, database path, capabilities and safety state. |
+| `GET /api/v2/overview` | Dashboard, agents, tools, model profiles, stats and recent runs. |
+| `GET/POST /api/v2/tasks` · `GET/PATCH/DELETE /api/v2/tasks/{id}` | Task board CRUD. |
+| `POST /api/v2/tasks/{id}/{start,pause,resume,retry,cancel}` | Run lifecycle controls. |
+| `GET /api/v2/runs/{id}` · `GET /api/v2/runs/{id}/events[/stream]` | Run state, persisted events and SSE timeline. |
+| `GET /api/v2/approvals` · `POST /api/v2/approvals/{id}/resolve` | Pending approvals and explicit resolution. |
+| `GET/POST /api/v2/knowledge/*` · `POST /api/v2/knowledge/ask` | Vault sources, search, cited answers and reindex. |
+| `GET/POST /api/v2/research/*` | Research projects, notes, claims, reports and task launch. |
+| `GET/POST /api/v2/connectors/*` · `/api/v2/connections/*` | Connector catalog, credentials, OAuth, sync, items and actions. |
+| `GET/POST /api/v2/automations/*` · `POST /api/v2/hooks/{id}` | Scheduled/webhook automations and signed hook delivery. |
+| `GET/POST /api/v2/files/*` · `POST /api/v2/files/checkpoints/{id}/restore` | Approved-root files, checkpoints/diffs and merge/prune restore. |
+| `GET/POST /api/v2/code/*` · `/api/v2/backups/*` · `/api/v2/audit/*` | Code index, encrypted backups and hash-chain audit/export. |
+| `GET/POST /api/v2/safety/*` | Kill switch, offline mode, redaction and app lock; unlock sessions last 8 hours. |
+| `POST /api/v2/mobile/pair` · `GET /api/v2/mobile/{me,brief}` · `POST /api/v2/mobile/{command,share}` | Mobile pairing and token-authorized companion API. |
+
+Mobile endpoints read `X-Mobile-Token` or `Authorization: Bearer`; the rest of `/api/v2`
+is intended for the localhost UI (do not expose the server to an untrusted network
+without an authenticating reverse proxy). When the app lock is enabled, local UI/API
+requests require the `grok_unlock` cookie issued by `POST /api/v2/safety/unlock`;
+`/static/*`, `/mobile`, `/api/v2/health`, `/unlock` and the lock-status endpoint remain
+reachable. Existing paired mobile devices authenticate with their own token; creating a
+new pairing, listing devices, or revoking a device still requires the unlock cookie. To
+reset a forgotten PIN, stop the server and remove the `app_lock` row from
+`platform_meta` in the SQLite database.
 
 **`/api/chat/stream` SSE event types**: `telemetry` (context budget + image URL),
 `token` (streamed text + tok/s), `desktop_step` (pilot progress), `error`, `done`
@@ -418,7 +545,7 @@ All endpoints are on `http://127.0.0.1:8000`.
 
 ---
 
-## 9. Data, Environment & Privacy
+## 10. Data, Environment & Privacy
 
 **Files created at runtime (all under the repo):**
 
@@ -430,6 +557,10 @@ data/
 ├── llama_server.pid       # pid of the managed llama-server
 ├── llama_server.log       # engine log
 ├── uploads/               # images you attach to chats
+├── workspaces/            # isolated agent/task workspaces
+├── backups/               # encrypted SQLite + workspace backups
+├── file_checkpoints/      # file snapshot archives
+├── attachments/           # knowledge/file ingestion cache
 ├── long_convo_report.json # outputs of the stress-test script
 └── long_convo_transcript.md
 /tmp/grok_shots/           # Desktop Pilot screenshots (ephemeral, safe to delete)
@@ -444,6 +575,7 @@ data/
 | `GROK_DB_PATH` | `data/grok_memory.db` | SQLite location (used by tests to isolate) |
 | `GROK_STATE_FILE` | `data/active_model.json` | provider/model state file |
 | `GROK_OPENAI_KEY_FILE` | `data/openai_key.json` | saved key location |
+| `GROK_WORKSPACE_ROOTS` | unset | extra approved file roots, separated by `os.pathsep` |
 | `LLAMA_HOST` / `LLAMA_PORT` | `127.0.0.1` / `8080` | local engine address |
 | `WEB_HOST` / `WEB_PORT` | `127.0.0.1` / `8000` | web server binding |
 | `CTX_SIZE` | `4096` | llama-server context size |
@@ -458,7 +590,7 @@ context) and attached images are sent to your configured OpenAI endpoint.
 
 ---
 
-## 10. Running & Testing
+## 11. Running & Testing
 
 ### Start the app
 
@@ -476,7 +608,7 @@ One-time venv setup (enables the Desktop Pilot by exposing system PyGObject):
 
 ```bash
 uv venv --system-site-packages .venv
-uv pip install --python .venv/bin/python fastapi uvicorn httpx
+uv pip install --python .venv/bin/python fastapi uvicorn httpx cryptography pydantic pillow
 ```
 
 ### Tests & tools (all offline unless noted)
@@ -486,6 +618,7 @@ uv pip install --python .venv/bin/python fastapi uvicorn httpx
 | `scripts/test_openai_integration.py` | End-to-end ChatGPT-provider test against the bundled mock API (42 checks: key validation, model listing/switching, streaming chat, memory persistence, sanitize-retry). |
 | `scripts/mock_openai_server.py` | The mock OpenAI API (`127.0.0.1:8123`, key `sk-mock-valid`) used by the suite. |
 | `scripts/test_memory.py` | Unit tests for the 4-tier memory (dossier extraction, FTS search, summaries, budget invariant). |
+| `tests/test_v2_platform.py` | Offline v2 API/UI suite (13 tests): health/meta, platform/mobile/unlock routes, PIN app-lock enforcement, out-of-root workspace rejection, mobile pairing/command/brief/revoke with brute-force throttling, task completion/events/recent runs, approval pause/resume with argument binding, run pause/resume, tool-budget partial completion, three-failure stop guard, redirect-SSRF blocking, audit-chain verification, backup create/inspect/stage/delete with master-key exclusion, large append writes and checkpoint prune. Run with `.venv/bin/python -m unittest -v tests.test_v2_platform`. |
 | `scripts/stress_test_long_convo.py` | 25-turn conversation stress test with adversarial recall probes; writes a transcript + JSON report into `data/`. |
 | `scripts/test_vision_api.py` / `test_natural_conversation.py` | Scripted chat/vision checks against a running server. |
 | `scripts/browser_*.py` | Headless-Chrome UI tests (require `websockets` + `google-chrome`). |
@@ -493,13 +626,13 @@ uv pip install --python .venv/bin/python fastapi uvicorn httpx
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | Engine card shows **Server Offline** | app not running — start it with `./start.sh` |
 | **API Key Missing** / cloud models locked (🔒) | click 🔑 and save a key, or `export OPENAI_API_KEY=sk-…` before start |
-| Desktop Pilot error about `python3-gi` | use the `.venv` setup from §6.1/§10 (system PyGObject + pip deps) |
+| Desktop Pilot error about `python3-gi` | use the `.venv` setup from §6.1/§11 (system PyGObject + pip deps) |
 | Local model won't start | check `data/llama_server.log`; verify the GGUF path in `config.py → MODELS`; VRAM may be low — pick a lower GPU-offload level |
 | `No module named 'certifi'` (older setups) | `pip install certifi`, or rely on the built-in fallback (`config.httpx_verify()`) |
 | Port 8000 busy | another instance is running: `ss -tlnp \| grep 8000` |
@@ -507,10 +640,13 @@ uv pip install --python .venv/bin/python fastapi uvicorn httpx
 
 ---
 
-## 12. File Map
+## 13. File Map
 
 ```
-server.py                     FastAPI app: all endpoints, SSE chat, static serving
+server.py                     FastAPI app: chat endpoints, SSE, static serving, v2 router/lifespan
+api_v2.py                     /api/v2 platform endpoints
+services/                     v2 platform services (agents, runs, approvals, knowledge, connectors, audit...)
+tests/test_v2_platform.py     offline v2 API/UI smoke tests
 config.py                     paths, providers, model catalogs, key mgmt, budgets, VRAM logic
 start.sh                      convenience wrapper → scripts/start.sh
 requirements.txt              pip dependencies (+ notes about PyGObject)
@@ -531,7 +667,7 @@ memory/
 persona/
   prompts.py                  GROK_MODES: persona system prompts + sampling
   chatml.py                   token estimation + ChatML formatting
-static/                       UI (no build step): index.html, js/app.js, js/api.js, css
-scripts/                      start/dev/test/utilities (see §10)
-data/                         runtime state (DB, keys, uploads, logs) — see §9
+static/                       UI (no build step): chat, /platform Command Center, /mobile Pocket, CSS/JS
+scripts/                      start/dev/test/utilities (see §11)
+data/                         runtime state (DB, keys, uploads, logs) — see §10
 ```

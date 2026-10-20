@@ -81,6 +81,30 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentActiveTask = null;
     let isTaskPaused = false;
 
+    // Document / code attachments + chat UX elements
+    const attachDocBtn = document.getElementById('attach-doc-btn');
+    const docFileInput = document.getElementById('doc-file-input');
+    const filePreviewContainer = document.getElementById('file-preview-container');
+    const filePreviewName = document.getElementById('file-preview-name');
+    const filePreviewTag = document.getElementById('file-preview-tag');
+    const removeFileBtn = document.getElementById('remove-file-btn');
+    const stopGenBtn = document.getElementById('stop-gen-btn');
+    const sessionSearchInput = document.getElementById('session-search-input');
+    const openTasksBtn = document.getElementById('open-tasks-btn');
+    const closeTasksBtn = document.getElementById('close-tasks-btn');
+    const tasksDrawer = document.getElementById('tasks-drawer');
+    const tasksListEl = document.getElementById('tasks-list');
+    const taskDetailEl = document.getElementById('task-detail');
+    const taskCounter = document.getElementById('task-counter');
+
+    let currentAttachedFile = null;
+    let currentTaskEventStream = null;
+    let selectedTaskId = null;
+    let allSessions = [];
+
+    /** Regenerate: remembers the last user prompt to re-run it. */
+    let lastUserPrompt = null;
+
     function escapeHtml(str) {
         if (!str) return '';
         return String(str)
@@ -477,15 +501,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 else if (sg.status === 'failed') statusIcon = '❌';
 
                 let typeBadgeClass = 'type-desktop';
-                if (sg.tool_domain === 'workspace') typeBadgeClass = 'type-workspace';
-                else if (sg.tool_domain === 'verification') typeBadgeClass = 'type-verification';
+                const toolPref = sg.tool_preference || sg.tool_domain || 'hybrid';
+                if (toolPref === 'workspace') typeBadgeClass = 'type-workspace';
+                else if (toolPref === 'verification') typeBadgeClass = 'type-verification';
 
+                const descText = sg.description || sg.title || '';
                 item.innerHTML = `
                     <span class="dlv-subgoal-icon">${statusIcon}</span>
                     <div class="dlv-subgoal-content">
                         <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-                            <span class="dlv-subgoal-desc">${idx + 1}. ${escapeHtml(sg.description)}</span>
-                            <span class="dlv-subgoal-badge ${typeBadgeClass}">${escapeHtml(sg.tool_domain || 'auto')}</span>
+                            <span class="dlv-subgoal-desc">${idx + 1}. ${escapeHtml(descText)}</span>
+                            <span class="dlv-subgoal-badge ${typeBadgeClass}">${escapeHtml(toolPref)}</span>
                         </div>
                         ${sg.result_summary ? `<div class="dlv-subgoal-summary">${escapeHtml(sg.result_summary)}</div>` : ''}
                     </div>
@@ -526,7 +552,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function isLikelyDesktop(text) {
         const t = (text || '').toLowerCase().trim();
-        return t.startsWith('/desktop') || /\b(open|launch|start|run|search|click|cursor)\b.*\b(brave|chrome|browser|files|calculator|terminal)\b/.test(t);
+        return t.startsWith('/desktop') || /\b(open|launch|start|run|search|click|cursor)\b.*\b(brave|chrome|browser|files|calculator|terminal|antigravity|code|ide)\b/.test(t);
     }
 
     // Image Attachment Elements & State
@@ -556,6 +582,58 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (removeImageBtn) {
         removeImageBtn.addEventListener('click', clearAttachedImage);
+    }
+
+    function setAttachedFile(meta) {
+        currentAttachedFile = meta;
+        if (filePreviewName) filePreviewName.innerText = meta.name;
+        if (filePreviewTag) {
+            const ext = (meta.extension || '').replace('.', '').toUpperCase();
+            filePreviewTag.innerText = `${ext || 'FILE'} • ${meta.chars || meta.size} ${meta.chars ? 'chars' : 'bytes'}`;
+        }
+        if (filePreviewContainer) filePreviewContainer.classList.remove('hidden');
+        chatInput.focus();
+    }
+
+    function clearAttachedFile() {
+        currentAttachedFile = null;
+        if (filePreviewName) filePreviewName.innerText = '';
+        if (filePreviewContainer) filePreviewContainer.classList.add('hidden');
+        if (docFileInput) docFileInput.value = '';
+    }
+
+    if (removeFileBtn) removeFileBtn.addEventListener('click', clearAttachedFile);
+
+    if (attachDocBtn && docFileInput) {
+        attachDocBtn.addEventListener('click', () => docFileInput.click());
+        docFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            try {
+                const meta = await API.uploadAttachment(file);
+                setAttachedFile(meta);
+            } catch (err) {
+                alert(`Attachment upload failed: ${err.message}`);
+            }
+        });
+    }
+
+    function setStreaming(isActive) {
+        isStreaming = isActive;
+        if (stopGenBtn) stopGenBtn.classList.toggle('hidden', !isActive);
+        if (sendBtn) sendBtn.classList.toggle('hidden', isActive);
+        chatInput.disabled = false;
+    }
+
+    if (stopGenBtn) {
+        stopGenBtn.addEventListener('click', () => {
+            if (currentAbortController) {
+                if (currentAbortController._onAbort) currentAbortController._onAbort();
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
+            setStreaming(false);
+        });
     }
 
     if (attachBtn && imageFileInput) {
@@ -942,31 +1020,47 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Load Sessions
     async function loadSessions() {
-        const sessions = await API.getSessions();
+        allSessions = await API.getSessions();
         sessionListEl.innerHTML = '';
-        if (sessions.length === 0) {
-            const newSess = await API.createSession();
-            currentSessionId = newSess.id;
-            loadSessions();
+        if (allSessions.length === 0) {
+            sessionListEl.innerHTML = '<div class="session-empty">No previous chats</div>';
             return;
         }
 
-        if (!currentSessionId && sessions.length > 0) {
-            currentSessionId = sessions[0].id;
+        const filter = (sessionSearchInput && sessionSearchInput.value || '').trim().toLowerCase();
+        const sessions = filter
+            ? allSessions.filter(s => (s.title || '').toLowerCase().includes(filter))
+            : allSessions;
+
+        if (sessions.length === 0) {
+            sessionListEl.innerHTML = '<div class="session-empty">No matching chats</div>';
+            return;
         }
 
         sessions.forEach(sess => {
             const item = document.createElement('div');
             item.className = `session-item ${sess.id === currentSessionId ? 'active' : ''}`;
             item.innerHTML = `
-                <span class="session-title">${sess.title || 'Conversation'}</span>
-                <button class="session-del-btn" title="Delete">&times;</button>
+                <span class="session-title" title="Double-click to rename">${escapeHtml(sess.title || 'Conversation')}</span>
+                <span class="session-actions">
+                    <button class="session-rename-btn" title="Rename">✎</button>
+                    <button class="session-del-btn" title="Delete">&times;</button>
+                </span>
             `;
+
+            const titleEl = item.querySelector('.session-title');
+            titleEl.addEventListener('dblclick', (e) => {
+                e.stopPropagation();
+                startRenameSession(sess, titleEl);
+            });
 
             item.addEventListener('click', (e) => {
                 if (e.target.classList.contains('session-del-btn')) {
                     e.stopPropagation();
                     deleteSession(sess.id);
+                } else if (e.target.classList.contains('session-rename-btn')) {
+                    e.stopPropagation();
+                    startRenameSession(sess, titleEl);
                 } else {
                     switchSession(sess.id);
                 }
@@ -977,8 +1071,48 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (currentSessionId) {
             loadMessages(currentSessionId);
+        } else {
+            showWelcomeHero();
         }
     }
+
+    function startRenameSession(sess, titleEl) {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'session-rename-input';
+        input.value = sess.title || 'Conversation';
+        titleEl.replaceWith(input);
+        input.focus();
+        input.select();
+
+        const commit = async () => {
+            const newTitle = input.value.trim() || sess.title;
+            try {
+                await API.renameSession(sess.id, newTitle);
+            } catch (err) {
+                console.error('Rename failed', err);
+            }
+            loadSessions();
+        };
+        input.addEventListener('blur', commit);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+            if (e.key === 'Escape') { e.preventDefault(); loadSessions(); }
+        });
+    }
+
+    if (sessionSearchInput) {
+        sessionSearchInput.addEventListener('input', () => {
+            // Re-render list from cached sessions without refetching messages
+            const filter = sessionSearchInput.value.trim().toLowerCase();
+            sessionListEl.querySelectorAll('.session-item').forEach(item => {
+                const title = item.querySelector('.session-title');
+                if (!title) return;
+                item.style.display = (!filter || title.innerText.toLowerCase().includes(filter)) ? '' : 'none';
+            });
+        });
+    }
+
 
     async function switchSession(id) {
         currentSessionId = id;
@@ -989,17 +1123,25 @@ document.addEventListener('DOMContentLoaded', () => {
     async function deleteSession(id) {
         await API.deleteSession(id);
         if (currentSessionId === id) {
-            currentSessionId = null;
+            startNewChat();
         }
         loadSessions();
     }
 
-    newChatBtn.addEventListener('click', async () => {
-        const newSess = await API.createSession('New Conversation', currentMode);
-        currentSessionId = newSess.id;
-        loadSessions();
+    function startNewChat() {
+        currentSessionId = null;
+        chatInput.value = '';
+        chatInput.style.height = 'auto';
+        clearAttachedImage();
+        clearAttachedFile();
         showWelcomeHero();
-    });
+        if (sessionListEl) {
+            sessionListEl.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+        }
+        chatInput.focus();
+    }
+
+    newChatBtn.addEventListener('click', startNewChat);
 
     function showWelcomeHero() {
         messagesContainer.innerHTML = `
@@ -1036,14 +1178,67 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         messages.forEach(msg => {
-            renderMessage(msg.role, msg.content, null, msg.image_url);
+            renderMessage(msg.role, msg.content, null, msg.image_url, msg.id);
         });
         scrollToBottom();
     }
 
-    function renderMessage(role, content, meta = null, imageUrl = null) {
+    function buildMessageActions(row, role, content, messageId) {
+        const actions = document.createElement('div');
+        actions.className = 'message-actions';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'msg-action-btn';
+        copyBtn.title = 'Copy';
+        copyBtn.textContent = 'Copy';
+        copyBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(content || '');
+            copyBtn.textContent = 'Copied!';
+            setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+        });
+        actions.appendChild(copyBtn);
+
+        if (messageId && role === 'user') {
+            const editBtn = document.createElement('button');
+            editBtn.className = 'msg-action-btn';
+            editBtn.title = 'Edit and resend';
+            editBtn.textContent = 'Edit';
+            editBtn.addEventListener('click', () => startEditMessage(messageId, content, row));
+            actions.appendChild(editBtn);
+        }
+
+        if (role === 'assistant') {
+            const regenBtn = document.createElement('button');
+            regenBtn.className = 'msg-action-btn';
+            regenBtn.title = 'Regenerate response';
+            regenBtn.textContent = 'Regenerate';
+            regenBtn.addEventListener('click', () => regenerateResponse(row));
+            actions.appendChild(regenBtn);
+        }
+
+        if (messageId) {
+            const delBtn = document.createElement('button');
+            delBtn.className = 'msg-action-btn danger';
+            delBtn.title = 'Delete message';
+            delBtn.textContent = 'Delete';
+            delBtn.addEventListener('click', async () => {
+                try {
+                    await API.deleteMessage(currentSessionId, messageId);
+                    row.remove();
+                } catch (err) {
+                    console.error('Delete failed', err);
+                }
+            });
+            actions.appendChild(delBtn);
+        }
+
+        return actions;
+    }
+
+    function renderMessage(role, content, meta = null, imageUrl = null, messageId = null) {
         const row = document.createElement('div');
         row.className = `message-row ${role}`;
+        if (messageId) row.dataset.messageId = messageId;
 
         let inner = '';
         if (role === 'assistant') {
@@ -1064,10 +1259,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
         inner += `</div>`;
         row.innerHTML = inner;
+        row.appendChild(buildMessageActions(row, role, content, messageId));
         messagesContainer.appendChild(row);
         scrollToBottom();
         return row;
     }
+
+    function startEditMessage(messageId, content, row) {
+        const bubble = row.querySelector('.message-bubble');
+        const original = bubble.innerHTML;
+        bubble.innerHTML = `
+            <textarea class="edit-message-input" rows="3">${escapeHtml(content)}</textarea>
+            <div class="edit-message-actions">
+                <button class="btn btn-primary btn-sm save-edit">Save &amp; Resend</button>
+                <button class="btn btn-secondary btn-sm cancel-edit">Cancel</button>
+            </div>
+        `;
+        const ta = bubble.querySelector('.edit-message-input');
+        ta.focus();
+        bubble.querySelector('.cancel-edit').addEventListener('click', () => { bubble.innerHTML = original; });
+        bubble.querySelector('.save-edit').addEventListener('click', async () => {
+            const newText = ta.value.trim();
+            if (!newText) return;
+            bubble.innerHTML = '<span class="cursor-blink">▍</span>';
+            await streamPrompt(newText, null, null, { editMessageId: messageId });
+        });
+    }
+
+    async function regenerateResponse(row) {
+        if (isStreaming) return;
+        row.remove();
+        await streamPrompt(lastUserPrompt || '', null, null, { regenerate: true });
+    }
+
 
     function scrollToBottom() {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
@@ -1078,22 +1302,42 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
         const text = chatInput.value.trim();
         const attachedImg = currentAttachedImage ? currentAttachedImage.dataUrl : null;
-        if ((!text && !attachedImg) || isStreaming) return;
+        if ((!text && !attachedImg && !currentAttachedFile) || isStreaming) return;
 
-        const promptText = text || (attachedImg ? "Analyze and describe this image without filters." : "");
+        const promptText = text || (attachedImg ? "Analyze and describe this image without filters." : "Summarize the attached file.");
         const previewImg = attachedImg;
+        const attachment = currentAttachedFile;
 
         // Clear input and attachment state
         chatInput.value = '';
         chatInput.style.height = 'auto';
         clearAttachedImage();
+        clearAttachedFile();
 
         // Remove welcome hero if visible
         const hero = messagesContainer.querySelector('.welcome-hero');
         if (hero) hero.remove();
 
         // Render user message with attached image
-        renderMessage('user', promptText, null, previewImg);
+        const userRow = renderMessage('user', promptText, null, previewImg);
+
+        await streamPrompt(promptText, attachedImg, attachment, {});
+    });
+
+    /**
+     * Streams a prompt to the backend and renders the assistant response.
+     * Options: { regenerate: bool, editMessageId: number, attachment: object }
+     */
+    async function streamPrompt(promptText, attachedImg, attachment, opts = {}) {
+        if (!currentSessionId) {
+            try {
+                const newSess = await API.createSession('New Conversation', currentMode);
+                currentSessionId = newSess.id;
+            } catch (err) {
+                console.error("Failed to create new session:", err);
+            }
+        }
+        lastUserPrompt = promptText;
 
         // Create empty assistant response row
         const assistantRow = document.createElement('div');
@@ -1109,73 +1353,73 @@ document.addEventListener('DOMContentLoaded', () => {
         let fullResponse = '';
         let lastTokSec = 0;
         let lastTotalTok = 0;
+        let wasAborted = false;
 
-        isStreaming = true;
-        sendBtn.disabled = true;
+        setStreaming(true);
 
-        currentAbortController = API.streamChat(
-            currentSessionId,
-            promptText,
-            currentMode,
-            attachedImg,
-            (budget, serverImageUrl) => {
-                // Telemetry callback
-                telemetryBar.innerText = `Context: ${budget.total_estimated_tokens}t (Dossier: ${budget.dossier_tokens}t • Episodic: ${budget.episodic_tokens}t)`;
+        const handlers = {
+            attachment: attachment || null,
+            regenerate: !!opts.regenerate,
+            edit_message_id: opts.editMessageId || null,
+            telemetry: (data) => {
+                const budget = data.budget || {};
+                telemetryBar.innerText = `Context: ${budget.total_estimated_tokens || 0}t (Dossier: ${budget.dossier_tokens || 0}t • Episodic: ${budget.episodic_tokens || 0}t)`;
                 if (currentMode === 'desktop' || promptText.startsWith('/desktop') || isLikelyDesktop(promptText)) {
                     if (stopDesktopBtn) stopDesktopBtn.classList.remove('hidden');
                     if (desktopLiveViewer) desktopLiveViewer.classList.remove('hidden');
                 }
             },
-            (token, tokSec, totalTok) => {
-                // Token stream chunk
-                fullResponse += token;
-                lastTokSec = tokSec;
-                lastTotalTok = totalTok;
+            token: (data) => {
+                fullResponse += data.token || '';
+                lastTokSec = data.tok_sec || lastTokSec;
+                lastTotalTok = data.total_tokens || lastTotalTok;
                 bubbleEl.innerHTML = (window.marked ? marked.parse(fullResponse) : fullResponse) + '<span class="cursor-blink">▍</span>';
                 scrollToBottom();
             },
-            (errorMessage) => {
-                bubbleEl.innerHTML = `<span style="color: var(--accent-red)">⚠️ ${errorMessage}</span>`;
-                isStreaming = false;
-                sendBtn.disabled = false;
+            error: (data) => {
+                const msg = data.message || data;
+                bubbleEl.innerHTML = `<span style="color: var(--accent-red)">⚠️ ${msg}</span>`;
+                setStreaming(false);
                 if (stopDesktopBtn) stopDesktopBtn.classList.add('hidden');
             },
-            () => {
-                // Done
-                isStreaming = false;
-                sendBtn.disabled = false;
+            done: (data) => {
+                setStreaming(false);
                 if (stopDesktopBtn) stopDesktopBtn.classList.add('hidden');
-                const metaHtml = `<span>⚡ ${lastTokSec} tok/s • ${lastTotalTok} tokens</span> <button class="btn-tiny copy-btn" title="Copy response">Copy</button>`;
-                bubbleEl.innerHTML = (window.marked ? marked.parse(fullResponse) : fullResponse) + `<div class="message-meta">${metaHtml}</div>`;
-                
-                const copyBtn = bubbleEl.querySelector('.copy-btn');
-                if (copyBtn) {
-                    copyBtn.addEventListener('click', () => {
-                        navigator.clipboard.writeText(fullResponse);
-                        copyBtn.innerText = 'Copied!';
-                        setTimeout(() => { copyBtn.innerText = 'Copy'; }, 2000);
-                    });
+                const responseText = (data && data.full_response) || fullResponse;
+                const metaHtml = `<span>⚡ ${lastTokSec} tok/s • ${lastTotalTok} tokens</span>`;
+                bubbleEl.innerHTML = (window.marked ? marked.parse(responseText) : responseText) + `<div class="message-meta">${metaHtml}</div>`;
+                if (data && data.image_url) {
+                    const att = document.createElement('div');
+                    att.className = 'message-attachment';
+                    att.innerHTML = `<img src="${data.image_url}" alt="Result" onclick="window.open('${data.image_url}', '_blank')">`;
+                    bubbleEl.insertBefore(att, bubbleEl.firstChild);
                 }
-
+                assistantRow.appendChild(buildMessageActions(assistantRow, 'assistant', responseText, null));
                 updateSystemStatus();
                 loadDossier();
-                loadSessions(); // Refresh titles
+                loadSessions();
             },
-            (desktopStep) => {
+            _done: () => {
+                if (wasAborted) {
+                    setStreaming(false);
+                    if (bubbleEl.querySelector('.cursor-blink')) {
+                        bubbleEl.innerHTML = (window.marked ? marked.parse(fullResponse) : fullResponse) +
+                            `<div class="message-meta"><span>⏹ Stopped</span></div>`;
+                    }
+                }
+            },
+            _error: (msg) => {
+                bubbleEl.innerHTML = `<span style="color: var(--accent-red)">⚠️ ${msg}</span>`;
+                setStreaming(false);
+            },
+            desktop_step: (desktopStep) => {
                 isDesktopRunning = true;
-                // Live Desktop Pilot Event
                 if (desktopLiveViewer) {
                     desktopLiveViewer.classList.remove('hidden');
                     if (stopDesktopBtn) stopDesktopBtn.classList.remove('hidden');
-                    if (desktopStep.step !== undefined) {
-                        dlvStepBadge.textContent = `Step ${desktopStep.step}`;
-                    }
-                    if (desktopStep.thought) {
-                        dlvThought.textContent = desktopStep.thought;
-                    }
-                    if (desktopStep.action) {
-                        dlvAction.textContent = desktopStep.action;
-                    }
+                    if (desktopStep.step !== undefined) dlvStepBadge.textContent = `Step ${desktopStep.step}`;
+                    if (desktopStep.thought) dlvThought.textContent = desktopStep.thought;
+                    if (desktopStep.action) dlvAction.textContent = desktopStep.action;
                     if (desktopStep.screenshot_url) {
                         if (dlvPlaceholder) dlvPlaceholder.style.display = 'none';
                         const img = new Image();
@@ -1199,27 +1443,20 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                     }
                 }
-
-                // Update PiP Always-on-Top HUD
                 updatePipWindow(desktopStep);
-
-                // Auto-open PiP on first step if supported and not opened yet
-                if (desktopStep.step === 1 && !pipWindow) {
-                    openPipWindow();
-                }
-
+                if (desktopStep.step === 1 && !pipWindow) openPipWindow();
                 if (desktopStep.status === 'completed' || desktopStep.status === 'error' || desktopStep.status === 'aborted') {
                     isDesktopRunning = false;
                 }
             },
-            (taskUpdate) => {
+            task_update: (taskUpdate) => {
                 if (taskUpdate && taskUpdate.task) {
                     currentActiveTask = taskUpdate.task;
                     currentActiveTaskId = taskUpdate.task_id || taskUpdate.task.id;
                     renderTaskSubgoals(currentActiveTask, currentActiveTask.subgoals);
                 }
             },
-            (subgoalUpdate) => {
+            subgoal_update: (subgoalUpdate) => {
                 if (subgoalUpdate && subgoalUpdate.task) {
                     currentActiveTask = subgoalUpdate.task;
                     currentActiveTaskId = subgoalUpdate.task_id || subgoalUpdate.task.id;
@@ -1227,16 +1464,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else if (currentActiveTask && subgoalUpdate && subgoalUpdate.subgoal) {
                     if (!currentActiveTask.subgoals) currentActiveTask.subgoals = [];
                     const sgIdx = currentActiveTask.subgoals.findIndex(s => s.id === subgoalUpdate.subgoal.id || s.sequence_order === subgoalUpdate.subgoal.sequence_order);
-                    if (sgIdx >= 0) {
-                        currentActiveTask.subgoals[sgIdx] = subgoalUpdate.subgoal;
-                    } else {
-                        currentActiveTask.subgoals.push(subgoalUpdate.subgoal);
-                    }
+                    if (sgIdx >= 0) currentActiveTask.subgoals[sgIdx] = subgoalUpdate.subgoal;
+                    else currentActiveTask.subgoals.push(subgoalUpdate.subgoal);
                     renderTaskSubgoals(currentActiveTask, currentActiveTask.subgoals);
                 }
             }
+        };
+
+        currentAbortController = API.streamChat(
+            currentSessionId,
+            promptText,
+            currentMode,
+            attachedImg,
+            handlers
         );
-    });
+        currentAbortController._onAbort = () => { wasAborted = true; };
+    }
+
 
     // Emergency Stop Desktop Pilot
     const stopDesktopBtn = document.getElementById('stop-desktop-btn');
@@ -1268,6 +1512,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Escape') {
             if (!memoryDrawer.classList.contains('hidden')) memoryDrawer.classList.add('hidden');
             if (apiKeyModal && !apiKeyModal.classList.contains('hidden')) apiKeyModal.classList.add('hidden');
+            if (tasksDrawer && !tasksDrawer.classList.contains('hidden')) tasksDrawer.classList.add('hidden');
         } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'm') {
             e.preventDefault();
             memoryDrawer.classList.toggle('hidden');
@@ -1275,8 +1520,166 @@ document.addEventListener('DOMContentLoaded', () => {
                 loadDossier();
                 loadEpisodic();
             }
+        } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+            e.preventDefault();
+            if (sessionSearchInput) { sessionSearchInput.focus(); sessionSearchInput.select(); }
+        } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 't') {
+            e.preventDefault();
+            openTasksDrawer();
         }
     });
+
+    // ------------------------------------------------------------------
+    // Task History Drawer
+    // ------------------------------------------------------------------
+    async function loadTaskHistory() {
+        if (!tasksListEl) return;
+        let tasks = [];
+        try {
+            tasks = await API.listTasks(40);
+        } catch (err) {
+            tasksListEl.innerHTML = `<div class="session-empty">Failed to load tasks: ${escapeHtml(err.message)}</div>`;
+            return;
+        }
+        if (taskCounter) taskCounter.innerText = tasks.filter(t => ['running', 'queued'].includes(t.status)).length || tasks.length;
+        tasksListEl.innerHTML = '';
+        if (!tasks.length) {
+            tasksListEl.innerHTML = '<div class="session-empty">No autonomous tasks yet.</div>';
+            return;
+        }
+        tasks.forEach(t => {
+            const el = document.createElement('div');
+            el.className = `task-list-item ${t.id === selectedTaskId ? 'active' : ''}`;
+            const statusClass = `status-${(t.status || '').replace(/[^a-z_]/g, '')}`;
+            el.innerHTML = `
+                <div class="task-list-head">
+                    <span class="task-status-pill ${statusClass}">${(t.status || 'unknown').replace(/_/g, ' ')}</span>
+                    <span class="task-list-date">${(t.created_at || '').slice(0, 16)}</span>
+                </div>
+                <div class="task-list-goal">${escapeHtml((t.goal || '').slice(0, 120))}</div>
+                <div class="task-list-progress">${t.completed_subgoals || 0}/${t.total_subgoals || 0} sub-goals</div>
+            `;
+            el.addEventListener('click', () => selectTask(t.id));
+            tasksListEl.appendChild(el);
+        });
+    }
+
+    async function selectTask(taskId) {
+        selectedTaskId = taskId;
+        if (currentTaskEventStream) { try { currentTaskEventStream.abort(); } catch (_) {} currentTaskEventStream = null; }
+        await renderTaskDetail(taskId);
+        loadTaskHistory();
+    }
+
+    async function renderTaskDetail(taskId) {
+        if (!taskDetailEl) return;
+        let t;
+        try {
+            t = await API.getTask(taskId);
+        } catch (err) {
+            taskDetailEl.innerHTML = `<div class="task-detail-empty">Failed to load task: ${escapeHtml(err.message)}</div>`;
+            return;
+        }
+        const events = (await API.getTaskEvents(taskId)).events || [];
+        let files = [];
+        try { files = (await API.listTaskFiles(taskId)).entries || []; } catch (_) {}
+
+        const statusClass = `status-${(t.status || '').replace(/[^a-z_]/g, '')}`;
+        const subgoalsHtml = (t.subgoals || []).map(sg => `
+            <div class="task-detail-subgoal ${sg.status}">
+                <span class="sg-status-icon">${sg.status === 'completed' ? '✅' : sg.status === 'failed' ? '❌' : sg.status === 'running' ? '🔄' : '•'}</span>
+                <div class="sg-body">
+                    <div class="sg-title">${escapeHtml(sg.title || '')}</div>
+                    <div class="sg-desc">${escapeHtml((sg.description || '').slice(0, 180))}</div>
+                    ${sg.verification_detail ? `<div class="sg-verify">🔎 ${escapeHtml(sg.verification_detail.slice(0, 140))}</div>` : ''}
+                </div>
+                <span class="sg-attempts">${sg.attempts || 0}↻</span>
+            </div>
+        `).join('') || '<div class="task-detail-empty">No sub-goals.</div>';
+
+        const filesHtml = files.map(f =>
+            `<a class="task-file-link" href="${API.taskFileUrl(taskId, f.path)}" target="_blank">${f.is_dir ? '📁' : '📄'} ${escapeHtml(f.path)}</a>`
+        ).join('') || '<span class="task-detail-empty">No files in workspace.</span>';
+
+        const eventsHtml = events.slice(-25).reverse().map(ev => `
+            <div class="task-event"><span class="task-event-type">${escapeHtml(ev.type || '?')}</span>
+            <span class="task-event-msg">${escapeHtml((ev.message || ev.detail || ev.status || '').toString().slice(0, 160))}</span></div>
+        `).join('') || '<span class="task-detail-empty">No events recorded.</span>';
+
+        const isActive = ['running', 'queued', 'paused'].includes(t.status);
+        taskDetailEl.innerHTML = `
+            <div class="task-detail-header">
+                <span class="task-status-pill ${statusClass}">${(t.status || '').replace(/_/g, ' ')}</span>
+                <code class="task-detail-id">${taskId}</code>
+            </div>
+            <h4 class="task-detail-goal">${escapeHtml(t.goal || '')}</h4>
+            <div class="task-detail-workspace">📂 ${escapeHtml(t.workspace_dir || '')}</div>
+            <div class="task-detail-controls">
+                ${isActive ? `
+                    <button class="btn btn-secondary btn-sm" id="td-pause">⏸ Pause</button>
+                    <button class="btn btn-secondary btn-sm" id="td-resume">▶ Resume</button>
+                    <button class="btn btn-secondary btn-sm danger" id="td-abort">⏹ Abort</button>` : ''}
+                <button class="btn btn-secondary btn-sm" id="td-retry">↻ Retry</button>
+                <button class="btn btn-secondary btn-sm" id="td-stream">📡 Live</button>
+            </div>
+            ${t.result_summary ? `<div class="task-detail-result">${escapeHtml(t.result_summary.slice(0, 600))}</div>` : ''}
+            ${t.last_error ? `<div class="task-detail-error">⚠️ ${escapeHtml(t.last_error.slice(0, 300))}</div>` : ''}
+            <div class="task-detail-section"><h5>Sub-goals</h5>${subgoalsHtml}</div>
+            <div class="task-detail-section"><h5>Files</h5><div class="task-files">${filesHtml}</div></div>
+            <div class="task-detail-section"><h5>Events</h5><div class="task-events">${eventsHtml}</div></div>
+        `;
+
+        const pauseBtn = taskDetailEl.querySelector('#td-pause');
+        const resumeBtn = taskDetailEl.querySelector('#td-resume');
+        const abortBtn = taskDetailEl.querySelector('#td-abort');
+        const retryBtn = taskDetailEl.querySelector('#td-retry');
+        const streamBtn = taskDetailEl.querySelector('#td-stream');
+        if (pauseBtn) pauseBtn.addEventListener('click', async () => { await API.pauseTask(taskId); await renderTaskDetail(taskId); });
+        if (resumeBtn) resumeBtn.addEventListener('click', async () => { await API.resumeTask(taskId); await renderTaskDetail(taskId); });
+        if (abortBtn) abortBtn.addEventListener('click', async () => { await API.abortTask(taskId); await renderTaskDetail(taskId); });
+        if (retryBtn) retryBtn.addEventListener('click', async () => {
+            try { await API.retryTask(taskId); } catch (err) { alert(err.message); }
+            await renderTaskDetail(taskId);
+        });
+        if (streamBtn) streamBtn.addEventListener('click', () => attachTaskLiveStream(taskId));
+    }
+
+    function attachTaskLiveStream(taskId) {
+        if (currentTaskEventStream) { try { currentTaskEventStream.abort(); } catch (_) {} }
+        currentTaskEventStream = API.streamTaskEvents(taskId, {
+            '*': async (ev) => {
+                const evBox = taskDetailEl.querySelector('.task-events');
+                if (evBox) {
+                    const div = document.createElement('div');
+                    div.className = 'task-event';
+                    div.innerHTML = `<span class="task-event-type">${escapeHtml(ev.type || '?')}</span><span class="task-event-msg">${escapeHtml((ev.message || ev.detail || ev.status || '').toString().slice(0, 160))}</span>`;
+                    evBox.insertBefore(div, evBox.firstChild);
+                }
+                if (ev.type === 'task_update') {
+                    const st = taskDetailEl.querySelector('.task-status-pill');
+                    if (st && ev.status) st.textContent = ev.status.replace(/_/g, ' ');
+                }
+                if (ev.type === 'task_update' && ['completed', 'partially_completed', 'failed', 'aborted', 'interrupted'].includes(ev.status)) {
+                    await renderTaskDetail(taskId);
+                    loadTaskHistory();
+                }
+            },
+            _error: () => {}
+        });
+    }
+
+    function openTasksDrawer() {
+        if (!tasksDrawer) return;
+        tasksDrawer.classList.remove('hidden');
+        loadTaskHistory();
+        if (selectedTaskId) renderTaskDetail(selectedTaskId);
+    }
+
+    if (openTasksBtn) openTasksBtn.addEventListener('click', openTasksDrawer);
+    if (closeTasksBtn) closeTasksBtn.addEventListener('click', () => tasksDrawer.classList.add('hidden'));
+    if (tasksDrawer) tasksDrawer.addEventListener('click', (e) => { if (e.target === tasksDrawer) tasksDrawer.classList.add('hidden'); });
+    loadTaskHistory();
+
 
     // Memory Inspector Drawer
     openMemoryBtn.addEventListener('click', () => {
@@ -1374,5 +1777,6 @@ document.addEventListener('DOMContentLoaded', () => {
     loadModels();
     updateSystemStatus();
     loadSessions();
+    startNewChat();
     setInterval(updateSystemStatus, 4000);
 });

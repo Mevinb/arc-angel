@@ -8,10 +8,12 @@ import json
 import time
 import asyncio
 import base64
+import logging
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict
+from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pathlib import Path
@@ -22,6 +24,9 @@ from config import (
     DEFAULT_CTX_SIZE,
     MODELS,
     DEFAULT_MODEL_ID,
+    ATTACHMENTS_DIR,
+    MAX_ATTACHMENT_BYTES,
+    MAX_ATTACHMENT_CHARS,
     PROVIDER_LOCAL,
     PROVIDER_OPENAI,
     OPENAI_MODELS,
@@ -64,15 +69,125 @@ from engine import (
 )
 from engine.vision import VisionEngine
 from engine.task_orchestrator import TaskOrchestrator, detect_task_type
+from engine.task_runner import TaskRunner
+from engine.workspace_tools import WorkspaceManager
+from services.db import init_platform_db
+from services.agents import AgentService
+from services.automations import AutomationService
+from services.policies import PolicyService
+from services.run_manager import RunManager
+from services.mobile import MobileService
+from services.safety import SafetyService
+from api_v2 import router as api_v2_router
+
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize additive v2 schema and defaults before accepting requests.
+    try:
+        init_platform_db()
+        PolicyService.ensure_defaults()
+        AgentService.ensure_defaults()
+    except Exception:
+        logger.exception("Platform v2 initialization failed")
+    # Auto-resume interrupted v2 runs and start the scheduler.  Both are
+    # best-effort: a failure here must not prevent the legacy chat UI starting.
+    try:
+        await RunManager.get().recover()
+    except Exception:
+        logger.exception("Could not recover interrupted v2 runs")
+    try:
+        AutomationService.start_scheduler()
+    except Exception:
+        logger.exception("Could not start automation scheduler")
     # Auto-ensure the local llama-server is online in background (local provider only)
     if get_active_provider() == PROVIDER_LOCAL:
         asyncio.create_task(asyncio.to_thread(LlamaProcessManager.ensure_running))
+    try:
+        await TaskRunner.recover_on_startup()
+    except Exception:
+        pass
     yield
+    try:
+        await AutomationService.stop_scheduler()
+    except Exception:
+        pass
+    try:
+        await RunManager.get().shutdown()
+    except Exception:
+        pass
+    try:
+        runner = TaskRunner()
+        if hasattr(runner, "shutdown"):
+            await runner.shutdown()
+    except Exception:
+        pass
 
-app = FastAPI(title="Local Grok Chatbot", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Local Grok Chatbot", version="2.0.0", lifespan=lifespan)
+app.include_router(api_v2_router)
+
+_PUBLIC_LOCK_PATHS = {
+    "/unlock", "/favicon.ico", "/api/v2/health",
+    "/api/v2/safety/unlock", "/api/v2/safety/lock-status",
+}
+
+
+@app.middleware("http")
+async def app_lock_middleware(request: Request, call_next):
+    """Require an unlock cookie for the local UI/API when the app lock is on.
+
+    Mobile endpoints use their own per-device token and static assets must load
+    for the unlock screen, so both remain reachable while locked.
+    """
+    path = request.url.path
+    if (
+        path in _PUBLIC_LOCK_PATHS
+        or path.startswith("/static/")
+        or path == "/mobile"
+        or path == "/api/v2/mobile/pair"
+    ):
+        return await call_next(request)
+    try:
+        locked = SafetyService.lock_enabled()
+    except Exception:
+        logger.exception("Could not read app-lock state")
+        locked = False
+    if not locked:
+        return await call_next(request)
+    # Already-paired mobile devices keep working while the local UI is locked;
+    # creating a new pairing or listing devices still requires an unlock cookie.
+    if path.startswith("/api/v2/mobile/"):
+        mobile_token = request.headers.get("X-Mobile-Token") or ""
+        auth = request.headers.get("Authorization") or ""
+        if not mobile_token and auth.lower().startswith("bearer "):
+            mobile_token = auth[7:].strip()
+        if mobile_token and MobileService.authenticate(mobile_token):
+            return await call_next(request)
+    token = request.cookies.get("grok_unlock") or request.headers.get("X-Unlock-Token")
+    if SafetyService.check_unlock_token(token):
+        return await call_next(request)
+    if path.startswith("/api/"):
+        return JSONResponse(
+            status_code=423,
+            content={"detail": "App locked. Open /unlock to enter your PIN."},
+        )
+    target = path + (f"?{request.url.query}" if request.url.query else "")
+    return RedirectResponse(
+        f"/unlock?next={quote(target, safe='/%?=&')}", status_code=303
+    )
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+@app.exception_handler(FileNotFoundError)
+async def file_not_found_handler(request: Request, exc: FileNotFoundError):
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+@app.exception_handler(PermissionError)
+async def permission_error_handler(request: Request, exc: PermissionError):
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_DIR.mkdir(exist_ok=True)
@@ -122,12 +237,18 @@ class CreateSessionRequest(BaseModel):
     title: Optional[str] = "New Conversation"
     mode: Optional[str] = "classic"
 
+class RenameSessionRequest(BaseModel):
+    title: str
+
 class ChatRequest(BaseModel):
     session_id: str
     message: str
     mode: Optional[str] = "classic"
     image_data: Optional[str] = None
     image_filename: Optional[str] = None
+    attachment: Optional[Dict] = None
+    regenerate: Optional[bool] = False
+    edit_message_id: Optional[int] = None
 
 class FactRequest(BaseModel):
     key: str
@@ -165,6 +286,30 @@ class TaskActionRequest(BaseModel):
 @app.api_route("/", methods=["GET", "HEAD"])
 async def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.api_route("/platform", methods=["GET", "HEAD"])
+async def platform():
+    target = STATIC_DIR / "platform.html"
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Command Center is not installed")
+    return FileResponse(target)
+
+
+@app.api_route("/mobile", methods=["GET", "HEAD"])
+async def mobile():
+    target = STATIC_DIR / "mobile.html"
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Mobile companion is not installed")
+    return FileResponse(target)
+
+
+@app.api_route("/unlock", methods=["GET", "HEAD"])
+async def unlock():
+    target = STATIC_DIR / "unlock.html"
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Unlock screen is not installed")
+    return FileResponse(target)
 
 # System & Engine Status
 @app.get("/api/models")
@@ -410,6 +555,17 @@ async def create_session(req: CreateSessionRequest):
         )
     return {"id": sess_id, "title": req.title, "mode": req.mode}
 
+@app.patch("/api/sessions/{session_id}")
+async def rename_session(session_id: str, req: RenameSessionRequest):
+    with db_session() as conn:
+        cur = conn.execute(
+            "UPDATE sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (req.title, session_id)
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "renamed", "id": session_id, "title": req.title}
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
     with db_session() as conn:
@@ -426,6 +582,18 @@ async def get_messages(session_id: str):
             (session_id,)
         )
         return [dict(row) for row in cursor.fetchall()]
+
+@app.delete("/api/sessions/{session_id}/messages/{message_id}")
+async def delete_message(session_id: str, message_id: int):
+    """Deletes a single message (used by edit/regenerate flows)."""
+    with db_session() as conn:
+        cur = conn.execute(
+            "DELETE FROM messages WHERE id = ? AND session_id = ?",
+            (message_id, session_id)
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Message not found")
+    return {"status": "deleted", "id": message_id}
 
 # Memory Inspector Endpoints
 @app.get("/api/memory/dossier")
@@ -539,6 +707,56 @@ async def set_desktop_display_mode(req: DisplayModeRequest):
         "reason": reason
     }
 
+# Attachments (chat document/code uploads)
+def _extract_attachment_text(path: Path, filename: str) -> str:
+    """Best-effort plain-text extraction from an uploaded attachment."""
+    suffix = Path(filename).suffix.lower()
+    try:
+        if suffix in (".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".jsonl",
+                      ".yaml", ".yml", ".toml", ".csv", ".ini", ".cfg", ".html", ".htm",
+                      ".css", ".sh", ".c", ".cpp", ".h", ".java", ".go", ".rs", ".sql", ".log"):
+            return path.read_text(encoding="utf-8", errors="replace")
+        if suffix == ".pdf":
+            try:
+                import pypdf  # optional dependency
+                reader = pypdf.PdfReader(str(path))
+                return "\n".join((page.extract_text() or "") for page in reader.pages)
+            except Exception as e:
+                return f"[PDF text extraction unavailable: {e}]"
+    except Exception as e:
+        return f"[Could not read attachment: {e}]"
+    return f"[Binary attachment '{filename}' stored; no text extraction available for this type.]"
+
+@app.post("/api/attachments")
+async def upload_attachment(request: Request):
+    """Accepts raw file bytes. Filename is passed via the X-Filename header."""
+    raw = await request.body()
+    filename = request.headers.get("x-filename", "attachment")
+    if len(raw) > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(status_code=413, detail=f"Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes")
+    safe_name = re.sub(r"[^\w.\-]+", "_", filename or "attachment")
+    att_id = uuid.uuid4().hex
+    dest = ATTACHMENTS_DIR / f"{att_id}_{safe_name}"
+    dest.write_bytes(raw)
+    text = _extract_attachment_text(dest, safe_name)
+    chars = len(text)
+    return {
+        "id": att_id,
+        "url": f"/api/attachments/{dest.name}",
+        "name": safe_name,
+        "size": len(raw),
+        "extension": Path(safe_name).suffix.lower(),
+        "chars": chars,
+        "preview": text[:200],
+    }
+
+@app.get("/api/attachments/{stored_name}")
+async def get_attachment(stored_name: str):
+    target = (ATTACHMENTS_DIR / stored_name).resolve()
+    if not str(target).startswith(str(ATTACHMENTS_DIR.resolve())) or not target.is_file():
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    return FileResponse(str(target), filename=stored_name)
+
 # Hierarchical Long-Horizon Orchestrator Endpoints
 @app.get("/api/orchestrator/tasks")
 async def list_orchestrator_tasks(limit: int = 20):
@@ -551,19 +769,79 @@ async def get_orchestrator_task(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     return t
 
+@app.post("/api/orchestrator/tasks/{task_id}/start")
+async def start_orchestrator_task(task_id: str):
+    runner = TaskRunner()
+    ok = await runner.start(task_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail="Task cannot be started (not found or already terminal)")
+    return {"status": "started", "task_id": task_id}
+
+@app.post("/api/orchestrator/tasks/{task_id}/retry")
+async def retry_orchestrator_task(task_id: str):
+    runner = TaskRunner()
+    ok = await runner.retry(task_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": "retrying", "task_id": task_id}
+
+@app.get("/api/orchestrator/tasks/{task_id}/events")
+async def get_orchestrator_events(task_id: str, since_id: int = 0, limit: int = 500):
+    return {"task_id": task_id, "events": TaskOrchestrator.get_events(task_id, since_id=since_id, limit=limit)}
+
+@app.get("/api/orchestrator/tasks/{task_id}/events/stream")
+async def stream_orchestrator_events(task_id: str, since_id: int = 0):
+    t = TaskOrchestrator.get_task(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    async def event_generator():
+        runner = TaskRunner()
+        async for ev in runner.subscribe(task_id, since_id=since_id):
+            yield f"data: {json.dumps(ev, default=str)}\n\n"
+            if ev.get("type") == "task_update" and ev.get("status") in (
+                "completed", "partially_completed", "failed", "aborted", "interrupted"
+            ):
+                break
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/api/orchestrator/tasks/{task_id}/files")
+async def list_orchestrator_files(task_id: str, rel_path: str = ""):
+    t = TaskOrchestrator.get_task(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    ws = WorkspaceManager(t["workspace_dir"])
+    try:
+        entries = ws.list_files(rel_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Unsafe or invalid path: {e}")
+    return {"task_id": task_id, "rel_path": rel_path, "entries": entries}
+
+@app.get("/api/orchestrator/tasks/{task_id}/file")
+async def get_orchestrator_file(task_id: str, rel_path: str):
+    t = TaskOrchestrator.get_task(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    ws_dir = Path(t["workspace_dir"]).resolve()
+    target = (ws_dir / rel_path).resolve()
+    if not str(target).startswith(str(ws_dir)) or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(target), filename=target.name)
+
 @app.post("/api/orchestrator/pause")
 async def pause_orchestrator_task(req: TaskActionRequest):
-    TaskOrchestrator.pause_task(req.task_id)
+    await TaskRunner().pause(req.task_id)
     return {"status": "paused", "task_id": req.task_id}
 
 @app.post("/api/orchestrator/resume")
 async def resume_orchestrator_task(req: TaskActionRequest):
-    TaskOrchestrator.resume_task(req.task_id)
+    await TaskRunner().resume(req.task_id)
     return {"status": "resumed", "task_id": req.task_id}
 
 @app.post("/api/orchestrator/abort")
 async def abort_orchestrator_task(req: TaskActionRequest):
-    TaskOrchestrator.abort_task(req.task_id)
+    await TaskRunner().abort(req.task_id)
     return {"status": "aborted", "task_id": req.task_id}
 
 
@@ -584,7 +862,7 @@ def is_desktop_intent(text: str) -> bool:
     if t.startswith("/desktop"):
         return True
     patterns = [
-        r"\b(?:open|launch|start|run)\s+(?:brave|chrome|google-chrome|browser|files|nautilus|terminal|calculator|calc|settings|code|vscode|spotify|discord)\b",
+        r"\b(?:open|launch|start|run)\s+(?:brave|chrome|google-chrome|browser|files|nautilus|terminal|calculator|calc|settings|code|vscode|antigravity|antigravity-ide|ide|spotify|discord)\b",
         r"\b(?:search|look up|google)\s+.*?\s+(?:in|on|with|using)\s+(?:brave|chrome|browser)\b",
         r"\b(?:in|on|using)\s+(?:brave|chrome|browser)\s+search\b",
         r"\bclick\s+(?:on\s+)?(?:the\s+)?[\w\s]+\b",
@@ -602,9 +880,9 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
     user_msg = (req.message or "").strip()
     mode = req.mode or "classic"
 
-    if not user_msg and not req.image_data:
+    if not user_msg and not req.image_data and not req.regenerate and not req.edit_message_id:
         raise HTTPException(status_code=400, detail="Message or image cannot be empty")
-    if not user_msg:
+    if not user_msg and not req.regenerate:
         user_msg = "Analyze and describe this image without filters."
 
     # Vision Analysis Pipeline
@@ -613,6 +891,9 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
     engine_info = get_active_engine_info()
     provider = engine_info["provider"]
     model_has_native_vision = engine_info["has_vision"]
+
+    saved_path: Optional[Path] = None
+    image_url = None
 
     if req.image_data:
         try:
@@ -643,6 +924,50 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
             if not model_has_native_vision:
                 image_analysis_text = f"[Attached image uploaded: {img_err}]"
 
+    # Attachment (document/code) text extraction + prompt injection
+    attachment_meta = None
+    attachment_text = ""
+    if req.attachment and req.attachment.get("id"):
+        att_name = req.attachment.get("name", "attachment")
+        stored = None
+        att_id = str(req.attachment["id"])
+        for cand in ATTACHMENTS_DIR.glob(f"{att_id}_*"):
+            stored = cand
+            break
+        if stored and stored.is_file():
+            raw_text = _extract_attachment_text(stored, att_name)
+            attachment_text = raw_text[:MAX_ATTACHMENT_CHARS]
+            attachment_meta = {
+                "url": f"/api/attachments/{stored.name}",
+                "name": att_name,
+                "type": Path(att_name).suffix.lower().lstrip("."),
+                "size": stored.stat().st_size,
+            }
+
+    # Regenerate / edit flows: drop the previous assistant turn (and the edited user msg)
+    if req.regenerate or req.edit_message_id:
+        with db_session() as conn:
+            if req.edit_message_id:
+                conn.execute(
+                    "DELETE FROM messages WHERE session_id = ? AND id >= ?",
+                    (session_id, req.edit_message_id)
+                )
+                user_message_id = None
+            else:
+                row = conn.execute(
+                    "SELECT id, content, image_url FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1",
+                    (session_id,)
+                ).fetchone()
+                if row:
+                    user_msg = row["content"]
+                    if not image_url:
+                        image_url = row["image_url"]
+                    user_message_id = row["id"]
+                    conn.execute(
+                        "DELETE FROM messages WHERE session_id = ? AND role = 'assistant' AND id > ?",
+                        (session_id, user_message_id)
+                    )
+
     # Ensure session exists or update title if it's default
     clean_title = user_msg.split("\n")[0][:36].strip()
     with db_session() as conn:
@@ -656,23 +981,46 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
         elif existing_sess["title"] in ["New Conversation", "New Chat"] and len(clean_title) > 0:
             conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (clean_title, session_id))
 
-    # 1. Store user message in DB with image_url
-    with db_session() as conn:
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, image_url) VALUES (?, 'user', ?, ?)",
-            (session_id, user_msg, image_url)
-        )
-        # Update session timestamp
-        conn.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
+    # 1. Store user message in DB with image_url / attachment
+    if req.edit_message_id:
+        # Edited user message was already removed; re-insert the new version
+        with db_session() as conn:
+            cur = conn.execute(
+                "INSERT INTO messages (session_id, role, content, image_url, attachment_url, attachment_name, attachment_type) VALUES (?, 'user', ?, ?, ?, ?, ?)",
+                (session_id, user_msg, image_url,
+                 attachment_meta["url"] if attachment_meta else None,
+                 attachment_meta["name"] if attachment_meta else None,
+                 attachment_meta["type"] if attachment_meta else None)
+            )
+            user_message_id = cur.lastrowid
+    elif not req.regenerate:
+        user_message_id = None
+        with db_session() as conn:
+            cur = conn.execute(
+                "INSERT INTO messages (session_id, role, content, image_url, attachment_url, attachment_name, attachment_type) VALUES (?, 'user', ?, ?, ?, ?, ?)",
+                (session_id, user_msg, image_url,
+                 attachment_meta["url"] if attachment_meta else None,
+                 attachment_meta["name"] if attachment_meta else None,
+                 attachment_meta["type"] if attachment_meta else None)
+            )
+            user_message_id = cur.lastrowid
+            # Update session timestamp
+            conn.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
 
     # 2. Assemble prompt using Multi-Tier Memory Orchestrator
-    effective_user_msg = f"{image_analysis_text}\n\nUser Question/Request: {user_msg}" if image_analysis_text else user_msg
+    prompt_extras = []
+    if image_analysis_text:
+        prompt_extras.append(image_analysis_text)
+    if attachment_text:
+        prompt_extras.append(f"[ATTACHED FILE: {attachment_meta['name'] if attachment_meta else 'attachment'}]\n```\n{attachment_text}\n```")
+    effective_user_msg = ("\n\n".join(prompt_extras) + f"\n\nUser Question/Request: {user_msg}") if prompt_extras else user_msg
 
     # Structured chat messages (used by OpenAI) + ChatML string (llama.cpp raw endpoint)
     chat_messages, budget = MemoryOrchestrator.assemble_messages(
         session_id=session_id,
         current_user_message=effective_user_msg,
-        mode=mode
+        mode=mode,
+        exclude_message_id=user_message_id
     )
     if provider == PROVIDER_LOCAL:
         chatml_prompt = format_chatml_prompt(chat_messages, append_assistant_header=True)
@@ -726,56 +1074,57 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
             summary_parts = [header_msg]
 
             last_shot_url = None
-            async for ev in orchestrator.run_task(task_id):
-                ev_type = ev.get("type")
-                if ev_type == "task_update":
-                    yield f"data: {json.dumps(ev)}\n\n"
-                    if ev.get("message"):
-                        msg_line = f"📋 *{ev['message']}*\n\n"
-                        summary_parts.append(msg_line)
-                        yield f"data: {json.dumps({'type': 'token', 'token': msg_line})}\n\n"
-                elif ev_type == "subgoal_update":
-                    yield f"data: {json.dumps(ev)}\n\n"
-                    sg_title = ev.get("title", "")
-                    sg_idx = ev.get("subgoal_idx", 0)
-                    sg_status = ev.get("status", "")
-                    if sg_status == "running":
-                        sg_line = f"🔄 **Sub-goal {sg_idx}**: *{sg_title}* [In Progress]\n"
-                        summary_parts.append(sg_line)
-                        yield f"data: {json.dumps({'type': 'token', 'token': sg_line})}\n\n"
-                    elif sg_status == "completed":
-                        sg_line = f"✅ **Sub-goal {sg_idx} Completed**: *{sg_title}*\n"
-                        summary_parts.append(sg_line)
-                        yield f"data: {json.dumps({'type': 'token', 'token': sg_line})}\n\n"
-                    elif sg_status == "failed":
-                        sg_line = f"❌ **Sub-goal {sg_idx} Failed**: *{sg_title}*\n"
-                        summary_parts.append(sg_line)
-                        yield f"data: {json.dumps({'type': 'token', 'token': sg_line})}\n\n"
-                elif ev_type == "desktop_step":
-                    shot_url = ev.get("screenshot_url")
-                    if shot_url:
-                        last_shot_url = shot_url
-                    yield f"data: {json.dumps(ev)}\n\n"
-                    thought = ev.get("thought", "")
-                    act = ev.get("action", "")
-                    det = ev.get("detail", "")
-                    if thought:
-                        s_str = f"  - ⚡ `{act}`: {det.split('→')[-1].strip()}\n"
-                        summary_parts.append(s_str)
-                        yield f"data: {json.dumps({'type': 'token', 'token': s_str})}\n\n"
+            try:
+                runner = TaskRunner()
+                await runner.start(task_id)
+                async for ev in runner.subscribe(task_id, since_id=0):
+                    ev_type = ev.get("type")
+                    if ev_type == "task_update":
+                        yield f"data: {json.dumps(ev)}\n\n"
+                        if ev.get("message"):
+                            msg_line = f"📋 *{ev['message']}*\n\n"
+                            summary_parts.append(msg_line)
+                            yield f"data: {json.dumps({'type': 'token', 'token': msg_line})}\n\n"
+                    elif ev_type == "subgoal_update":
+                        yield f"data: {json.dumps(ev)}\n\n"
+                        sg_title = ev.get("title", "") or (ev.get("subgoal") or {}).get("title", "")
+                        sg_idx = ev.get("subgoal_idx", 0)
+                        sg_status = ev.get("status", "") or (ev.get("subgoal") or {}).get("status", "")
+                        if sg_status == "running":
+                            sg_line = f"🔄 **Sub-goal {sg_idx}**: *{sg_title}* [In Progress]\n"
+                            summary_parts.append(sg_line)
+                            yield f"data: {json.dumps({'type': 'token', 'token': sg_line})}\n\n"
+                        elif sg_status == "completed":
+                            sg_line = f"✅ **Sub-goal {sg_idx} Completed**: *{sg_title}*\n"
+                            summary_parts.append(sg_line)
+                            yield f"data: {json.dumps({'type': 'token', 'token': sg_line})}\n\n"
+                    elif ev_type == "desktop_step":
+                        if ev.get("screenshot_url"):
+                            last_shot_url = ev["screenshot_url"]
+                        yield f"data: {json.dumps(ev)}\n\n"
+                    elif ev_type == "error":
+                        yield f"data: {json.dumps(ev)}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                return
 
+            # Persist assistant summary if not already persisted by runner
+            try:
+                with db_session() as conn:
+                    cur = conn.execute("SELECT id FROM messages WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,))
+                    if not cur.fetchone():
+                        assistant_text = "".join(summary_parts)
+                        conn.execute(
+                            "INSERT INTO messages (session_id, role, content, task_id) VALUES (?, 'assistant', ?, ?)",
+                            (session_id, assistant_text, task_id),
+                        )
+            except Exception:
+                pass
+
+            final_payload = {"type": "done", "full_response": "".join(summary_parts)}
             if last_shot_url:
-                final_link = f"\n[View Final Task Screen State]({last_shot_url})\n"
-                summary_parts.append(final_link)
-                yield f"data: {json.dumps({'type': 'token', 'token': final_link})}\n\n"
-
-            assistant_text = "".join(summary_parts).strip()
-            with db_session() as conn:
-                conn.execute(
-                    "INSERT INTO messages (session_id, role, content, tokens) VALUES (?, 'assistant', ?, ?)",
-                    (session_id, assistant_text, len(summary_parts))
-                )
-            yield f"data: {json.dumps({'type': 'done', 'full_response': assistant_text})}\n\n"
+                final_payload["image_url"] = last_shot_url
+            yield f"data: {json.dumps(final_payload)}\n\n"
             return
 
         # Desktop Agent execution mode (Mutter Wayland GNOME 46)
@@ -793,21 +1142,22 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
                 if shot_url:
                     last_shot_url = shot_url
 
-                # Dedicated desktop_step event for clean UI live preview without DOM tearing
                 yield f"data: {json.dumps({'type': 'desktop_step', 'step': step_num, 'thought': thought, 'action': act, 'detail': det, 'screenshot_url': shot_url, 'status': ev.get('status', 'running')})}\n\n"
-                
+
                 if step_num == 0:
                     step_str = f"🚀 *{det}*\n\n"
                 elif thought:
                     step_str = f"**Step {step_num}**\n- 💭 *{thought}*\n- ⚡ `{act}`: {det.split('→')[-1].strip()}\n\n"
                 else:
-                    step_str = f"- **Step {step_num}**: `{act}` — {det}\n\n"
-                
+                    step_str = f"**Step {step_num}**\n- ⚡ `{act}`: {det}\n\n"
                 summary_parts.append(step_str)
                 yield f"data: {json.dumps({'type': 'token', 'token': step_str})}\n\n"
 
+                if ev.get("status") in ("completed", "aborted", "max_steps", "error"):
+                    break
+
             if last_shot_url:
-                final_link = f"\n[View Final Desktop State]({last_shot_url})\n"
+                final_link = f"\n[View Final Desktop Screen State]({last_shot_url})\n"
                 summary_parts.append(final_link)
                 yield f"data: {json.dumps({'type': 'token', 'token': final_link})}\n\n"
 
@@ -817,27 +1167,16 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
                     "INSERT INTO messages (session_id, role, content, tokens) VALUES (?, 'assistant', ?, ?)",
                     (session_id, assistant_text, len(summary_parts))
                 )
-            yield f"data: {json.dumps({'type': 'done', 'full_response': assistant_text})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'full_response': assistant_text, 'image_url': last_shot_url})}\n\n"
             return
 
-        # Check engine readiness
-        if provider == PROVIDER_OPENAI:
-            if not get_openai_api_key():
-                yield f"data: {json.dumps({'type': 'error', 'message': 'No OpenAI API key configured. Click the 🔑 ChatGPT Key button in the sidebar to add one, then pick a ☁️ model.'})}\n\n"
-                return
-        else:
-            is_ready = await llama_client.is_ready()
-            if not is_ready:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'llama-server is not running or still loading the model. Please start the server in the control bar.'})}\n\n"
-                return
-
-        active_client = openai_client if provider == PROVIDER_OPENAI else llama_client
+        # Classic chat / ChatGPT mode
         full_response = []
         try:
-            async for chunk in active_client.stream_completion(
+            async for chunk in llm_router.stream_completion(
                 prompt=chatml_prompt,
-                messages=chat_messages if provider == PROVIDER_OPENAI else None,
-                image_data=req.image_data if model_has_native_vision else None,
+                messages=chat_messages,
+                image_data=req.image_data,
                 temperature=sampling_params.get("temperature", 0.80),
                 top_p=sampling_params.get("top_p", 0.90),
                 min_p=sampling_params.get("min_p", 0.05),
@@ -870,19 +1209,18 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
 
         assistant_text = "".join(full_response).strip()
 
-        # Save assistant response to DB
         with db_session() as conn:
             conn.execute(
                 "INSERT INTO messages (session_id, role, content, tokens) VALUES (?, 'assistant', ?, ?)",
                 (session_id, assistant_text, len(full_response))
             )
 
-        # Execute memory maintenance immediately so next turn has all facts and summaries
         try:
             MemoryOrchestrator.post_interaction_tasks(
                 session_id=session_id,
                 user_msg=effective_user_msg if image_analysis_text else user_msg,
-                assistant_msg=assistant_text
+                assistant_msg=assistant_text,
+                user_message_id=user_message_id
             )
         except Exception as err:
             print(f"[!] Error in post_interaction_tasks: {err}")
@@ -890,6 +1228,7 @@ async def stream_chat(req: ChatRequest, background_tasks: BackgroundTasks):
         yield f"data: {json.dumps({'type': 'done', 'full_response': assistant_text})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 @app.get("/api/sessions/{session_id}/export")
 async def export_session(session_id: str):

@@ -33,6 +33,7 @@ data/openai_key.json
 
 # Local Databases & Runtime State
 data/*.db
+data/*.db-*
 data/*.sqlite
 data/*.sqlite3
 data/*.log
@@ -41,6 +42,14 @@ data/running_process.json
 data/pilot_display_mode.json
 data/long_convo_*
 data/uploads/
+data/workspaces/
+data/attachments/
+data/backups/
+data/file_checkpoints/
+data/restore_staging/
+data/plugins/
+data/sandbox/
+data/secrets/
 
 # Models & Weights
 *.gguf

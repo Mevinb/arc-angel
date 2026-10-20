@@ -80,9 +80,27 @@ const API = {
         return res.json();
     },
 
+    async renameSession(sessionId, title) {
+        const res = await fetch(`/api/sessions/${sessionId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data;
+    },
+
     async getMessages(sessionId) {
         const res = await fetch(`/api/sessions/${sessionId}/messages`);
         return res.json();
+    },
+
+    async deleteMessage(sessionId, messageId) {
+        const res = await fetch(`/api/sessions/${sessionId}/messages/${messageId}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data;
     },
 
     async exportSession(sessionId) {
@@ -123,100 +141,110 @@ const API = {
     },
 
     /**
-     * SSE Streaming Chat with optional image support
+     * Attachment upload (documents / code). Returns {url, name, type, size, chars}.
      */
-    streamChat(sessionId, message, mode, imageData, onTelemetry, onToken, onError, onDone, onDesktopStep, onTaskUpdate, onSubgoalUpdate) {
-        // If 4th arg is a function, imageData was omitted
+    async uploadAttachment(file) {
+        const res = await fetch('/api/attachments', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) },
+            body: file
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data;
+    },
+
+    /**
+     * Generic Server-Sent Events reader over a POST response body.
+     * Handlers: an object mapping event `type` -> callback(data).
+     */
+    _readSSE(response, handlers, controller) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        const dispatch = (data) => {
+            const fn = handlers[data.type] || handlers['*'];
+            if (fn) fn(data);
+        };
+
+        const pump = () => {
+            reader.read().then(({ done, value }) => {
+                if (done) {
+                    if (handlers._done) handlers._done();
+                    return;
+                }
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed || !trimmed.startsWith('data: ')) continue;
+                    try {
+                        dispatch(JSON.parse(trimmed.substring(6)));
+                    } catch (err) {
+                        console.error('SSE JSON parse error', err, trimmed);
+                    }
+                }
+                pump();
+            }).catch(err => {
+                if (err.name !== 'AbortError' && handlers._error) handlers._error(err.message);
+            });
+        };
+        pump();
+    },
+
+    /**
+     * SSE Streaming Chat with optional image support.
+     * `handlers` may be an object {telemetry, token, error, done, desktop_step,
+     * task_update, subgoal_update, _done, _error}. For backwards compatibility,
+     * positional callbacks are also accepted.
+     */
+    streamChat(sessionId, message, mode, imageData, ...rest) {
         let imgData = null;
-        let cbTelemetry = onTelemetry;
-        let cbToken = onToken;
-        let cbError = onError;
-        let cbDone = onDone;
-        let cbDesktopStep = onDesktopStep;
-        let cbTaskUpdate = onTaskUpdate;
-        let cbSubgoalUpdate = onSubgoalUpdate;
+        let handlers = {};
+
+        // Detect legacy positional callback signature
         if (typeof imageData === 'function') {
-            imgData = null;
-            cbTelemetry = imageData;
-            cbToken = onTelemetry;
-            cbError = onToken;
-            cbDone = onError;
-            cbDesktopStep = onDone;
-            cbTaskUpdate = onDesktopStep;
-            cbSubgoalUpdate = onTaskUpdate;
+            // imageData was omitted
+            const [onTelemetry, onToken, onError, onDone, onDesktopStep, onTaskUpdate, onSubgoalUpdate] = [imageData, ...rest];
+            handlers = {
+                telemetry: onTelemetry, token: onToken, error: onError, done: onDone,
+                desktop_step: onDesktopStep, task_update: onTaskUpdate, subgoal_update: onSubgoalUpdate,
+                _done: () => { if (onDone) onDone(); }, _error: onError
+            };
         } else {
             imgData = imageData;
+            const last = rest[rest.length - 1];
+            if (last && typeof last === 'object' && !Array.isArray(last) && (last.token || last._done || last.telemetry || last.task_update)) {
+                handlers = last;
+            } else if (typeof rest[0] === 'function') {
+                const [onTelemetry, onToken, onError, onDone, onDesktopStep, onTaskUpdate, onSubgoalUpdate] = rest;
+                handlers = {
+                    telemetry: onTelemetry, token: onToken, error: onError, done: onDone,
+                    desktop_step: onDesktopStep, task_update: onTaskUpdate, subgoal_update: onSubgoalUpdate,
+                    _done: () => { if (onDone) onDone(); }, _error: onError
+                };
+            }
         }
 
         const controller = new AbortController();
+        const body = { session_id: sessionId, message, mode, image_data: imgData };
+        if (handlers.attachment) body.attachment = handlers.attachment;
+        if (handlers.regenerate) body.regenerate = true;
+        if (handlers.edit_message_id) body.edit_message_id = handlers.edit_message_id;
 
         fetch('/api/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                session_id: sessionId, 
-                message, 
-                mode,
-                image_data: imgData 
-            }),
+            body: JSON.stringify(body),
             signal: controller.signal
         }).then(response => {
-            if (!response.ok) {
-                throw new Error(`HTTP error ${response.status}`);
-            }
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-
-            function readChunk() {
-                reader.read().then(({ done, value }) => {
-                    if (done) {
-                        if (cbDone) cbDone();
-                        return;
-                    }
-
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop(); // keep last incomplete line
-
-                    for (const line of lines) {
-                        const trimmed = line.trim();
-                        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-                        
-                        try {
-                            const data = JSON.parse(trimmed.substring(6));
-                            if (data.type === 'telemetry') {
-                                if (cbTelemetry) cbTelemetry(data.budget, data.image_url);
-                            } else if (data.type === 'token') {
-                                if (cbToken) cbToken(data.token, data.tok_sec, data.total_tokens);
-                            } else if (data.type === 'desktop_step') {
-                                if (cbDesktopStep) cbDesktopStep(data);
-                            } else if (data.type === 'task_update') {
-                                if (cbTaskUpdate) cbTaskUpdate(data);
-                            } else if (data.type === 'subgoal_update') {
-                                if (cbSubgoalUpdate) cbSubgoalUpdate(data);
-                            } else if (data.type === 'error') {
-                                if (cbError) cbError(data.message);
-                            } else if (data.type === 'done') {
-                                if (cbDone) cbDone(data.full_response);
-                            }
-                        } catch (err) {
-                            console.error('SSE JSON parse error', err, trimmed);
-                        }
-                    }
-
-                    readChunk();
-                }).catch(err => {
-                    if (err.name !== 'AbortError') {
-                        onError(err.message);
-                    }
-                });
-            }
-
-            readChunk();
+            if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+            this._readSSE(response, handlers, controller);
         }).catch(err => {
-            onError(err.message);
+            if (handlers._error) handlers._error(err.message);
+            else if (handlers.error) handlers.error(err.message);
         });
 
         return controller;
@@ -258,14 +286,58 @@ const API = {
     /**
      * Hierarchical Long-Horizon Task Orchestrator endpoints
      */
-    async listTasks() {
-        const res = await fetch('/api/orchestrator/tasks');
+    async listTasks(limit = 30) {
+        const res = await fetch(`/api/orchestrator/tasks?limit=${limit}`);
         return res.json();
     },
 
     async getTask(taskId) {
         const res = await fetch(`/api/orchestrator/tasks/${taskId}`);
         return res.json();
+    },
+
+    async startTask(taskId) {
+        const res = await fetch(`/api/orchestrator/tasks/${taskId}/start`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data;
+    },
+
+    async retryTask(taskId) {
+        const res = await fetch(`/api/orchestrator/tasks/${taskId}/retry`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data;
+    },
+
+    async getTaskEvents(taskId, sinceId = 0) {
+        const res = await fetch(`/api/orchestrator/tasks/${taskId}/events?since_id=${sinceId}`);
+        return res.json();
+    },
+
+    async listTaskFiles(taskId, relPath = '') {
+        const res = await fetch(`/api/orchestrator/tasks/${taskId}/files?rel_path=${encodeURIComponent(relPath)}`);
+        return res.json();
+    },
+
+    taskFileUrl(taskId, relPath) {
+        return `/api/orchestrator/tasks/${taskId}/file?rel_path=${encodeURIComponent(relPath)}`;
+    },
+
+    /**
+     * Live task event stream (SSE via GET).
+     */
+    streamTaskEvents(taskId, handlers = {}) {
+        const controller = new AbortController();
+        fetch(`/api/orchestrator/tasks/${taskId}/events/stream`, { signal: controller.signal })
+            .then(response => {
+                if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+                this._readSSE(response, handlers, controller);
+            })
+            .catch(err => {
+                if (err.name !== 'AbortError' && handlers._error) handlers._error(err.message);
+            });
+        return controller;
     },
 
     async pauseTask(taskId) {
